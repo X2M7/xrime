@@ -12,7 +12,7 @@ xrime 是基于 [Trime](https://github.com/osfans/trime) 和 [X2M7/trime](https:
 
 发布 APK 分别支持 ARM64 和 x86_64，最低支持 Android 5.0。测试前请备份词典和配置。项目采用 [GPL-3.0-or-later](LICENSE) 许可证。
 
-[English](README.md) · [下载预发布版](https://github.com/X2M7/xrime/releases)
+[English](README.md) · [项目主页](https://x2m7.github.io/xrime/) · [下载预发布版](https://github.com/X2M7/xrime/releases)
 
 <details>
 <summary>历史 X2M7/trime 说明（不代表 xrime 的发布状态）</summary>

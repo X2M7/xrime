@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: xrime website
+
+on:
+  push:
+    branches: [develop]
+    paths:
+      - 'site/**'
+      - '.github/workflows/xrime-pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: xrime-pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: ${{ github.repository == 'X2M7/xrime' && github.ref == 'refs/heads/develop' }}
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Check out website
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Upload website
+        uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
+        with:
+          path: site
+      - name: Deploy website
+        id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4

@@ -12,7 +12,7 @@ The first release is an **alpha prerelease**. It is not a production-ready repla
 
 Release APKs target Android 5.0 or later and are provided separately for ARM64 and x86_64. Back up dictionaries and configuration before testing. The project is licensed under [GPL-3.0-or-later](LICENSE).
 
-[简体中文](README_sc.md) · [Releases](https://github.com/X2M7/xrime/releases)
+[简体中文](README_sc.md) · [Website](https://x2m7.github.io/xrime/) · [Releases](https://github.com/X2M7/xrime/releases)
 
 <details>
 <summary>Historical X2M7/trime README (not xrime release claims)</summary>
