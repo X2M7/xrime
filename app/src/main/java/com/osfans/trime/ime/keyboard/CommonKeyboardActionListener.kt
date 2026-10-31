@@ -12,10 +12,10 @@ import android.view.KeyEvent
 import android.widget.Toast
 import androidx.lifecycle.lifecycleScope
 import com.osfans.trime.R
-import com.osfans.trime.core.CandidateSnapshot
 import com.osfans.trime.core.KeyModifiers
 import com.osfans.trime.core.RimeApi
 import com.osfans.trime.core.RimeKeyEvent
+import com.osfans.trime.core.RimeUnavailableException
 import com.osfans.trime.daemon.RimeSession
 import com.osfans.trime.daemon.launchOnReady
 import com.osfans.trime.data.prefs.AppPrefs
@@ -25,23 +25,25 @@ import com.osfans.trime.data.theme.ThemeManager
 import com.osfans.trime.data.theme.model.LiquidKeyboard
 import com.osfans.trime.ime.clipboard.ClipboardWindow
 import com.osfans.trime.ime.core.PrivacyModeState
+import com.osfans.trime.ime.core.InputView
 import com.osfans.trime.ime.core.TrimeInputMethodService
 import com.osfans.trime.ime.dialog.EnabledSchemaPickerDialog
-import com.osfans.trime.ime.performance.InputRequest
 import com.osfans.trime.ime.switches.SwitchOptionWindow
 import com.osfans.trime.ime.symbol.LiquidWindow
 import com.osfans.trime.ime.window.BoardWindowManager
 import com.osfans.trime.ui.main.settings.ColorPickerDialog
 import com.osfans.trime.ui.main.settings.SoundEffectPickerDialog
 import com.osfans.trime.ui.main.settings.ThemePickerDialog
+import com.osfans.trime.ui.main.settings.presentColorPicker
 import com.osfans.trime.util.AppUtils
 import com.osfans.trime.util.InputMethodUtils
 import com.osfans.trime.util.buildIntentFromAction
 import com.osfans.trime.util.buildIntentFromArgument
 import com.osfans.trime.util.customFormatDateTime
+import com.osfans.trime.util.iso8601LocalDateTime
 import com.osfans.trime.util.isAsciiPrintable
 import com.osfans.trime.util.toast
-import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import org.kodein.di.DI
 import org.kodein.di.DIAware
@@ -56,6 +58,7 @@ class CommonKeyboardActionListener(override val di: DI) : DIAware {
     private val service: TrimeInputMethodService by instance()
     private val theme: Theme by instance()
     private val rime: RimeSession by instance()
+    private val inputView: InputView by instance()
     private val windowManager: BoardWindowManager by instance()
     private val keyboardWindow: KeyboardWindow by instance()
     private val liquidWindow: LiquidWindow by instance()
@@ -81,13 +84,36 @@ class CommonKeyboardActionListener(override val di: DI) : DIAware {
         }
     }
 
+    private var colorPickerRequest: Job? = null
+
     private fun showColorPicker() {
+        if (colorPickerRequest?.isActive == true) return
         val editorToken = service.editorToken
-        showDialog {
-            ColorPickerDialog.build(service.lifecycleScope, context) {
-                service.postRimeJob {
-                    if (service.isCurrentEditor(editorToken)) commitComposition()
-                }.join()
+        val active = { service.isCurrentEditor(editorToken) && service.isInputViewShown && inputView.isAttachedToWindow && inputView.isShown }
+        val failed: (Exception) -> Unit = { failure ->
+            Timber.e(failure, "Unable to load or apply a color scheme")
+            service.toast(R.string.color_scheme_unavailable)
+        }
+        val request = service.postRimeJob {
+            presentColorPicker(
+                create = {
+                    ColorPickerDialog.build(service.lifecycleScope, context, ownerActive = active, reportFailure = failed) {
+                        service.postRimeJob {
+                            if (service.isCurrentEditor(editorToken)) commitComposition()
+                        }.join()
+                    }
+                },
+                ownerActive = active,
+                present = service::showDialog,
+                reportFailure = failed,
+            )
+        }
+        colorPickerRequest = request
+        request.invokeOnCompletion { failure ->
+            // runOnReady can fail before the builder executes. Ordinary lifecycle
+            // cancellation remains silent; only a current editor receives a report.
+            if (failure is RimeUnavailableException) {
+                service.lifecycleScope.launch { if (active()) failed(failure) }
             }
         }
     }
@@ -108,20 +134,10 @@ class CommonKeyboardActionListener(override val di: DI) : DIAware {
         }
     }
 
-    private fun expandActiveText(input: String): String = if (input.matches(PLACEHOLDER_PATTERN)) {
-        input.format(
-            service.getActiveText(1),
-            service.getActiveText(2),
-            service.getActiveText(3),
-            service.getActiveText(4),
-        )
-    } else {
-        input
-    }
-
     val listener by lazy {
         object : KeyboardActionListener {
             override fun onPress(keyEventCode: Int) {
+                if (!service.allowInputAction()) return
                 InputFeedbackManager.run {
                     keyPressSound(keyEventCode)
                     keyPressSpeak(keyEventCode)
@@ -129,7 +145,19 @@ class CommonKeyboardActionListener(override val di: DI) : DIAware {
             }
 
             override fun onAction(action: KeyAction) {
+                if (!service.allowInputAction()) return
                 val text = action.getText(keyboardWindow.currentKeyboard)
+                if (service.isClipboardSearchEditing) {
+                    when {
+                        action.commit.isNotEmpty() -> service.commitText(action.commit)
+                        text.isNotEmpty() && '{' !in text && '}' !in text -> onText(text)
+                        action.code == KeyEvent.KEYCODE_SWITCH_CHARSET && action.toggle == "ascii_mode" -> keyboardWindow.switchSearchLanguage()
+                        action.code == KeyEvent.KEYCODE_EISU && action.select == ".ascii" -> keyboardWindow.switchSearchLanguage(true)
+                        action.code == KeyEvent.KEYCODE_EISU && action.select == ".native" -> keyboardWindow.switchSearchLanguage(false)
+                        searchKeyAllowed(action.code) -> handleDefaultKeyAction(action)
+                    }
+                    return
+                }
                 val shouldHandle = when {
                     action.commit.isNotEmpty() -> {
                         service.commitText(action.commit)
@@ -179,7 +207,19 @@ class CommonKeyboardActionListener(override val di: DI) : DIAware {
             }
 
             private fun handleFunctionCommand(action: KeyAction) {
-                val arg = expandActiveText(action.option)
+                // Private copy reads only the bounded selected text, on its own worker.
+                if (action.command == "private_copy") {
+                    service.copySelectionPrivately()
+                    return
+                }
+                if (action.command == "clipboard_repeat") {
+                    service.repeatClipboardSelection(force = true)
+                    return
+                }
+                val arg = expandThemeCommand(action.option, service::getActiveText) ?: run {
+                    context.toast(R.string.theme_command_failed)
+                    return
+                }
 
                 when (action.command) {
                     "t9_digit" -> arg.singleOrNull()?.takeIf { it in '0'..'9' }?.let { digit ->
@@ -203,6 +243,8 @@ class CommonKeyboardActionListener(override val di: DI) : DIAware {
                     "commit" -> service.commitText(arg)
 
                     "date" -> service.commitText(customFormatDateTime(arg))
+
+                    "date_iso8601" -> service.commitText(iso8601LocalDateTime())
 
                     "run" -> handleRunCommand(arg)
 
@@ -275,10 +317,11 @@ class CommonKeyboardActionListener(override val di: DI) : DIAware {
             }
 
             private fun handleRunCommand(arg: String) {
-                buildIntentFromArgument(arg)?.let { intent ->
+                val launched = launchThemeCommand({ buildIntentFromArgument(arg) }) { intent ->
                     intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_HISTORY
                     service.startActivity(intent)
                 }
+                if (!launched) context.toast(R.string.theme_command_failed)
             }
 
             private fun handleApplyCommand(arg: String) {
@@ -308,10 +351,11 @@ class CommonKeyboardActionListener(override val di: DI) : DIAware {
             }
 
             private fun handleIntentAction(command: String, arg: String) {
-                buildIntentFromAction(command, arg)?.let { intent ->
+                val launched = launchThemeCommand({ buildIntentFromAction(command, arg) }) { intent ->
                     intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_HISTORY
                     service.startActivity(intent)
                 }
+                if (!launched) context.toast(R.string.theme_command_failed)
             }
 
             private fun handleSelectCandidate(arg: String) {
@@ -384,21 +428,29 @@ class CommonKeyboardActionListener(override val di: DI) : DIAware {
                 onKey(action.code, modifier)
             }
 
+            private fun searchKeyAllowed(code: Int): Boolean = service.isClipboardSearchKeyAllowed(code, 0)
+
             private fun isNavigationKey(keyCode: Int): Boolean = keyCode in KeyEvent.KEYCODE_DPAD_UP..KeyEvent.KEYCODE_DPAD_RIGHT ||
                 keyCode == KeyEvent.KEYCODE_MOVE_HOME ||
                 keyCode == KeyEvent.KEYCODE_MOVE_END
 
-            override fun onRepeat(action: KeyAction) = if (
-                (action.code == KeyEvent.KEYCODE_DEL || action.code == KeyEvent.KEYCODE_FORWARD_DEL) &&
-                action.commit.isEmpty() && action.getText(keyboardWindow.currentKeyboard).isEmpty()
-            ) {
-                enqueueKey(action.code, action.modifier or keyboardWindow.currentKeyboard.modifier)
-            } else {
-                onAction(action)
-                null
+            override fun onRepeat(action: KeyAction): kotlinx.coroutines.Job? {
+                if (!service.allowInputAction()) return null
+                val modifier = action.modifier or keyboardWindow.currentKeyboard.modifier
+                if (service.isClipboardSearchEditing && !service.isClipboardSearchKeyAllowed(action.code, modifier)) return null
+                return if ((action.code == KeyEvent.KEYCODE_DEL || action.code == KeyEvent.KEYCODE_FORWARD_DEL) &&
+                    action.commit.isEmpty() && action.getText(keyboardWindow.currentKeyboard).isEmpty()
+                ) {
+                    enqueueKey(action.code, modifier)
+                } else {
+                    onAction(action)
+                    null
+                }
             }
 
             override fun onKey(keyEventCode: Int, metaState: Int) {
+                if (!service.allowInputAction()) return
+                if (service.isClipboardSearchEditing && !service.isClipboardSearchKeyAllowed(keyEventCode, metaState)) return
                 enqueueKey(keyEventCode, metaState)
             }
 
@@ -471,14 +523,12 @@ class CommonKeyboardActionListener(override val di: DI) : DIAware {
             )
 
             private suspend fun RimeApi.commitMacroText(text: String) {
-                clearPredictionContext()
-                val request = currentCoroutineContext()[InputRequest]
-                val snapshot = request?.let { CandidateSnapshot(it.editor, 0, it.id) } ?: CandidateSnapshot.EMPTY
-                service.commitTextWithoutPredictionReset(text, snapshot)
+                emitLiteralMacroText(text)
             }
 
             override fun onText(input: String) {
-                if (input.isEmpty()) return
+                if (!service.allowInputAction()) return
+                if (input.isEmpty() || (service.isClipboardSearchEditing && ('{' in input || '}' in input))) return
                 Timber.d("onText")
                 val editorToken = service.editorToken
                 if (!service.isCurrentEditor(editorToken)) return
@@ -494,8 +544,48 @@ class CommonKeyboardActionListener(override val di: DI) : DIAware {
                     Timber.w(failure, "Rejected cyclic or excessive language macro")
                     return // No partial mode/text command was accepted.
                 }
+                val inputParts = if (expanded == null) try {
+                    expandInputMacro(input) { token ->
+                        theme.resolveAction(token).takeIf { it.commit.isEmpty() }?.text
+                    }
+                } catch (failure: IllegalStateException) {
+                    Timber.w(failure, "Rejected cyclic or excessive input macro")
+                    return
+                } else null
+                val inputActions = inputParts?.map { value ->
+                    if (value.startsWith('{') && value.endsWith('}')) theme.resolveAction(value.removeSurrounding("{", "}")) else null
+                }
+                val pureInput = inputActions != null && inputActions.all { action ->
+                    action == null || action.commit.isNotEmpty() || action.getText(keyboardWindow.currentKeyboard).isNotEmpty() || isDefaultMacroKey(action)
+                }
                 if (!input[0].isAsciiPrintable() && status.isComposing) {
                     service.postRimeJob { commitComposition() }
+                }
+                if (pureInput) {
+                    checkNotNull(inputParts).zip(checkNotNull(inputActions)).forEach { (value, action) ->
+                        if (!service.isCurrentEditor(editorToken)) return
+                        val text = action?.getText(keyboardWindow.currentKeyboard).orEmpty()
+                        when {
+                            action != null && action.commit.isNotEmpty() -> service.postRimeJob {
+                                if (service.isCurrentEditor(editorToken)) emitLiteralMacroText(action.commit)
+                            }
+                            action != null && text.isNotEmpty() -> service.postRimeJob {
+                                if (service.isCurrentEditor(editorToken)) {
+                                    if (!text[0].isAsciiPrintable()) {
+                                        if (statusCached.isComposing) commitComposition()
+                                        emitLiteralMacroText(text)
+                                    } else simulateKeySequence(text)
+                                }
+                            }
+                            action != null -> handleDefaultKeyAction(action)
+                            else -> service.postRimeJob {
+                                if (service.isCurrentEditor(editorToken)) {
+                                    if (!value[0].isAsciiPrintable()) emitLiteralMacroText(value) else simulateKeySequence(value)
+                                }
+                            }
+                        }
+                    }
+                    return
                 }
                 for (value in expanded ?: keyboardMacroParts(input)) {
                     if (!service.isCurrentEditor(editorToken) || (expanded != null && rime.run { statusCached.schemaId } != schemaId)) return
@@ -531,7 +621,4 @@ class CommonKeyboardActionListener(override val di: DI) : DIAware {
         }
     }
 
-    companion object {
-        private val PLACEHOLDER_PATTERN = Regex(".*(%([1-4]\\$)?s).*")
-    }
 }

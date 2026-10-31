@@ -1,10 +1,10 @@
 # Stable build-plugin backport
 
-AGP 9.4.1 and KSP 2.3.11 still call `Configuration.setVisible(false)`.
+AGP 9.4.1 and KSP 2.3.11 call `Configuration.setVisible(false)`.
 Build8 emitted 52 AGP and 3 KSP deprecations per build phase on Gradle 9.8.1.
-There are 28 distinct AGP bytecode call sites and 3 KSP call sites; source-set
-configuration executes some AGP sites repeatedly. These are build-plugin calls,
-not application compiler or Android Lint warnings.
+The audited AGP 9.4.1 JAR has 28 distinct call sites and KSP has 3; the
+audited AGP 9.5.0 JAR has none. These are build-plugin calls, not application
+compiler or Android Lint warnings.
 
 [Gradle's upgrade guide](https://docs.gradle.org/9.8.1/userguide/upgrading_version_9.html#deprecate-visible-property)
 states that `visible` ceased to control `assemble` in Gradle 9.0 and can be
@@ -12,13 +12,12 @@ removed. It does not govern dependency resolution or access between projects.
 [Google's upstream change](https://android.googlesource.com/platform/tools/base/+/b54a369d23f52967d0073cb715c70a9c998f51c6)
 removes the same obsolete assignments while retaining the real consumption and
 resolution flags. The official AGP 9.5.0-alpha09 source JAR has removed all 28
-sites, but the latest stable AGP 9.4.1 still contains them. The KSP 2.3.12 source
-JAR still contains all 3 KSP sites.
+sites, and the reviewed stable AGP 9.5.0 binary also contains none. The KSP
+2.3.12 source JAR still contains all 3 KSP sites.
 
 The settings plugin uses public artifact-type and artifact-transform APIs
-to apply this narrow binary backport to the two stable plugin JARs. It keeps
-Gradle 9.8.1, including its current security fixes, and avoids switching the
-release build to an alpha AGP. It does not modify the Gradle distribution,
+to scan the pinned AGP JAR and apply the narrow binary backport where needed.
+It keeps Gradle 9.8.1. It does not modify the Gradle distribution,
 original dependency cache, warning logger, warning mode, or application JARs.
 
 The settings plugin lives in the separate `build-logic:compatibility` module
@@ -41,6 +40,7 @@ The inputs must match these complete upstream JAR hashes:
 | Artifact | SHA-256 | Call sites / changed classes |
 | --- | --- | --- |
 | `com.android.tools.build:gradle:9.4.1` | `4021fa6ea76b6fac076dd0bdacbb3e1b76c31f33b6c392e1a49a2e42072196bf` | 28 / 16 |
+| `com.android.tools.build:gradle:9.5.0` | `cc67fb686cbc10a252aca9395df3cef64345b02cf2c12cb9a8f032e8b8953490` | 0 / 0 |
 | `com.google.devtools.ksp:symbol-processing-gradle-plugin:2.3.11` | `8a00502695b7c44a190c12b9b54d6668724b7aa583f48f9657fab437fbcf8fb9` | 3 / 2 |
 
 Gradle's standard instrumentation pipeline produces class-only JARs while
@@ -82,13 +82,14 @@ In addition, run `help --warning-mode=fail` with a new Gradle user home and an
 empty versioned transform cache, then repeat it warm. An isolated copy of the
 wrapper distribution and dependency download cache may seed this check; do
 not copy the previous `caches/9.8.1/transforms` directory or change the original
-cache. Preserve both command logs and check for the 28 AGP and 3 KSP backport
-call sites on the cold run. A successful warm run alone does not reproduce
+cache. Preserve both command logs and check the pinned inventories: 28 AGP and
+3 KSP backport call sites for the selected 9.4.1 and 2.3.11 on the cold run.
+A successful warm run alone does not reproduce
 the clean-CI resolution failure. The four-platform CI configuration steps
 must also complete before claiming this regression is closed.
 
 For a bytecode inventory, resolve the pinned raw artifacts above, verify their
-complete SHA-256 values, and inspect the 18 class names listed in
+complete SHA-256 values, and inspect the affected class names listed in
 `GradleVisibleBackport.kt`. Re-audit the upstream inputs and the Gradle phase
 contract when changing this environment.
 
@@ -109,8 +110,9 @@ fails before writing the output JAR.
 
 Unmodified classes and every input's own non-class entry retain their exact
 bytes, including plugin registrations, manifests, upstream copyright notices
-and licenses in the raw resource route. Only the 16 AGP and 2 KSP class names
-can change in the raw input. Archive compression
+and licenses in the raw resource route. Only the 16 AGP 9.4.1 and 2 KSP class
+names can change in the raw input; the audited 9.5.0 entries remain unchanged.
+Archive compression
 may differ. The raw artifact bytes and filename participate in transform input
 normalization. Other buildscript JARs use an identity transform, returning the
 original input file without writing or modifying it. The attribute is attached
@@ -122,13 +124,16 @@ dependencies are outside this build-plugin transform's scope.
 The transform must run before plugin application; verify
 that requirement with `help --warning-mode=fail` before a complete build.
 
-The tests execute a generated JVM method against a configuration proxy to
+The tests resolve the exact 9.4.1 and 9.5.0 raw AGP artifacts without placing
+them on the test runtime classpath. They check the old 28-site backport, all
+9.5.0 archive entry bytes, and rejection of a one-byte change. They also execute
+a generated JVM method against a configuration proxy to
 verify that the obsolete call disappears while real flags and return value
 remain correct. They also reject malformed call patterns and changed plugin
 inputs. Full Debug/Release compilation, JVM tests, Lint and APK compatibility
 checks remain required; a passing transform test does not replace them.
 
-When stable AGP and KSP remove these calls, remove the settings plugin,
+When KSP also removes these calls, review removing the settings plugin,
 `GradleCompatibilityPlugin.kt`, `GradleVisibleBackport.kt`, their tests, and the
 build-only ASM dependency. Do not silently update the pinned hashes or relax
 the guards merely to accommodate a new plugin release.
@@ -149,7 +154,8 @@ and consumes the actual R8 DEX, configuration and original resource artifacts.
 The expected order is merge resources, R8, checked resource transform, package,
 then normal signing. It does not rewrite a signed APK, change DEX or disable v1.
 
-The task pins AGP 9.4.1, R8 9.4.24 and its compiler revision, both original
+The task pins AGP 9.4.1, R8 9.4.24 and compiler revision
+`61dc59bf271ddb314b5e0953231bd22df0ffb17e`, both original
 coroutines 1.11.0 JAR hashes and their selected modern R8 consumer-rule hashes.
 It requires the original two exact provider declarations and their exact
 post-R8 equivalents, then checks every DEX method ID, string and class
@@ -159,7 +165,34 @@ definitions, unknown services or provider contents, and signed input archives
 block the operation. Every retained resource entry's bytes are checked against
 the original archive. The eight binary DEX/ZIP tests include actual preservation
 and rejection cases; actual Release DEX semantic review, signature verification
-and Android acceptance are still required for publication.
+and Android acceptance are still required for publication. A frozen older
+source snapshot passed the complete 9.5.0 release build and the actual DEX
+guard, and its test-signed x86_64 release ran on API 21. Current-source builds,
+other ABIs and device acceptance must still be verified independently.
+
+The 9.4.1 raw and instrumented JAR hashes remain recognized, and the audited
+9.5.0 raw hash is retained for future review. The app's AGP and R8 version
+guard permits only its currently selected tuple. A future upgrade requires
+changing the catalog version and the AGP, R8 and R8 revision constants
+together after validation; changing only one fails closed. Unreviewed
+instrumented 9.5.0 inputs remain rejected.
+
+AGP 9.5.0 cannot currently replace 9.4.1 without losing checks for the
+API-21-compatible Lifecycle runtime. With Lifecycle runtime 2.9.0, AGP 9.5.0
+reports `ObsoleteLintCustomCheck` and skips `UnsafeLifecycleWhenUsage` and
+`RepeatOnLifecycleWrongUsage`. The official Lifecycle 2.9.4 Android AAR still
+contains the same incompatible lint JAR; Lifecycle 2.10.0 raises its minimum
+Android version to API 23. A separate experiment replacing only the build-time
+lint JAR is not integrated or approved as a production solution. No Lifecycle
+check is suppressed and `minSdk` remains 21.
+
+Lint currently reports three `AndroidGradlePluginVersion` update suggestions
+for 9.4.1 to 9.5.0 (application, library and build plugin coordinates). Because
+warnings are treated as errors, these suggestions cause `lintDebug` to fail;
+they are recorded here rather than globally suppressed. Re-evaluate the AGP
+upgrade when both Lifecycle checks can run without compromising API 21.
+See [AndroidX's AGP compatibility change](https://android.googlesource.com/platform/frameworks/support.git/+/1606adf0448db3b94758f3734111cb3a26976236%5E%21/)
+and the [Lifecycle release notes](https://developer.android.com/jetpack/androidx/releases/lifecycle#version_210_2).
 
 ## Debug coroutine service resources
 
@@ -177,9 +210,10 @@ declarations and two relocated copies must exist, with the reviewed provider
 bytes. The task forwards the merged resource archive unchanged through
 `InternalArtifactType.MERGED_JAVA_RES`, so APK packaging depends on a successful
 audit. Its verification marker remains available for build inspection; dependency
-ASM transforms do not read project task outputs. AGP 9.4.1 has no public
+ASM transforms do not read project task outputs. The reviewed AGP has no public
 `SingleArtifact.MERGED_JAVA_RES`; its initial merger producer remains ahead of
-this transform even when the producer is registered after `onVariants`. AGP 9.4.1 is required. Missing, conflicting, duplicate or extra
+this transform even when the producer is registered after `onVariants`. The
+exact reviewed AGP version is required. Missing, conflicting, duplicate or extra
 service declarations fail the build. Final APK resource inspection is still
 required because compiler-added resources are not necessarily source resources.
 Debug also removes AGP's exact default `/META-INF/services/**` merge rule:

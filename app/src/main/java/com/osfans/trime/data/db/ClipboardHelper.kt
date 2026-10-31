@@ -16,8 +16,6 @@ import com.osfans.trime.data.prefs.AppPrefs
 import com.osfans.trime.data.prefs.PreferenceDelegate
 import com.osfans.trime.ime.core.PrivacyModeState
 import com.osfans.trime.util.WeakHashSet
-import com.osfans.trime.util.matchesAny
-import com.osfans.trime.util.removeRegexSet
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -33,8 +31,8 @@ object ClipboardHelper :
     private lateinit var clbDb: Database
     private lateinit var clbDao: DatabaseDao
 
-    fun interface OnClipboardUpdateListener {
-        fun onUpdate(bean: DatabaseBean?)
+    internal fun interface OnClipboardUpdateListener {
+        fun onUpdate(update: ClipboardSuggestionState.Update<DatabaseBean>)
     }
 
     private val mutex = Mutex()
@@ -49,11 +47,11 @@ object ClipboardHelper :
     private val onUpdateListenersLock = Any()
     private val onUpdateListeners = WeakHashSet<OnClipboardUpdateListener>()
 
-    fun addOnUpdateListener(listener: OnClipboardUpdateListener) {
+    internal fun addOnUpdateListener(listener: OnClipboardUpdateListener) {
         synchronized(onUpdateListenersLock) { onUpdateListeners.add(listener) }
     }
 
-    fun removeOnUpdateListener(listener: OnClipboardUpdateListener) {
+    internal fun removeOnUpdateListener(listener: OnClipboardUpdateListener) {
         synchronized(onUpdateListenersLock) { onUpdateListeners.remove(listener) }
     }
 
@@ -61,22 +59,39 @@ object ClipboardHelper :
 
     private val enabledPref = clipPref.clipboardListening
     private val listenerRegistrationLock = Any()
+    private val privateCopyTickets = mutableSetOf<PrivateCopyHistoryTicket>()
 
     @Volatile
     private var listenerRegistered = false
 
     private val delayedPrivateClipboardQuarantine = DelayedPrivateClipboardQuarantine()
+    private val imageEvents = ClipboardImageEventGeneration()
+    private val repeatState = ClipboardRepeatState()
+    private data class RepeatEventIdentity(val timestamp: Long, val digest: String, val epoch: Long, val event: Long)
+    private val repeatIdentityLock = Any()
+    private var lastRepeatIdentity: RepeatEventIdentity? = null
+    private val suggestionState = ClipboardSuggestionState<DatabaseBean> { lastBean = it }
 
     private fun setClipboardListening(enabled: Boolean) {
+        var cleared: ClipboardSuggestionState.Update<DatabaseBean>? = null
         synchronized(listenerRegistrationLock) {
             if (enabled == listenerRegistered) return
             if (enabled) {
                 clipboardManager.addPrimaryClipChangedListener(this)
+                suggestionState.setEnabled(true)
+                listenerRegistered = true
+                repeatState.setEnabled(true)
+                imageEvents.enable()
             } else {
+                repeatState.setEnabled(false)
+                privateCopyTickets.forEach(PrivateCopyHistoryTicket::cancel)
+                imageEvents.disable()
+                listenerRegistered = false
+                cleared = suggestionState.setEnabled(false)
                 clipboardManager.removePrimaryClipChangedListener(this)
             }
-            listenerRegistered = enabled
         }
+        cleared?.let(::notifySuggestionChanged)
     }
 
     @Keep
@@ -91,34 +106,39 @@ object ClipboardHelper :
         launch { removeOutdated() }
     }
 
-    private val compareRules: Set<Regex> by lazy {
-        val rules by clipPref.clipboardCompareRules
-        rules
-            .split('\n')
-            .map { Regex(it.trim()) }
-            .toSet()
-    }
-
-    private val outputRules: Set<Regex> by lazy {
-        val rules by clipPref.clipboardOutputRules
-        rules
-            .split('\n')
-            .map { Regex(it) }
-            .toSet()
-    }
+    // Accessed inside mutex: observe preference changes without repeatedly compiling regexes.
+    private val clipboardRules = ClipboardRulesCache()
 
     @Volatile
     var lastBean: DatabaseBean? = null
 
-    private fun updateLastBean(bean: DatabaseBean?) {
-        lastBean = bean
+    private fun notifySuggestionChanged(update: ClipboardSuggestionState.Update<DatabaseBean>) {
         val listeners = synchronized(onUpdateListenersLock) { onUpdateListeners.toList() }
-        listeners.forEach { it.onUpdate(bean) }
+        listeners.forEach { it.onUpdate(update) }
+    }
+
+    internal fun isCurrentSuggestion(update: ClipboardSuggestionState.Update<DatabaseBean>): Boolean =
+        suggestionState.isCurrent(update)
+
+    private fun clearCapturedSuggestion(admission: Long) {
+        suggestionState.clear(admission)?.let(::notifySuggestionChanged)
     }
 
     /** Drop in-memory clipboard content and tell active input bars to hide their suggestion. */
     fun clearTransientSuggestion() {
-        updateLastBean(null)
+        repeatState.invalidate()
+        notifySuggestionChanged(suggestionState.clear())
+    }
+
+    internal fun repeatEvent(): Long = repeatState.event()
+    internal fun invalidateRepeat(): Long = repeatState.invalidate()
+    internal fun repeatSnapshot(): ClipboardRepeatState.Snapshot = repeatState.snapshot()
+    internal fun repeatAccepts(selection: ClipboardRepeatState.Selection): Boolean = repeatState.accepts(selection)
+    internal fun chooseForRepeat(event: Long, id: Int, text: String): Boolean {
+        if (text.length > 65536) return false
+        val epoch = PrivacyModeState.observeOrdinaryPersistence() ?: return false
+        val digest = clipboardRepeatDigest(text)
+        return PrivacyModeState.claimIfOrdinaryEpoch(epoch) { repeatState.choose(event, id, digest) }
     }
 
     /**
@@ -143,8 +163,10 @@ object ClipboardHelper :
      */
     fun quarantineCurrentPrimaryClip() {
         val timestampsSupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-        val result = runCatching { clipboardManager.primaryClip }
-        if (result.isFailure) {
+        val clip = try {
+            clipboardManager.primaryClip
+        } catch (failure: RuntimeException) {
+            if (failure is kotlinx.coroutines.CancellationException || failure is PersistencePermitExpiredException) throw failure
             delayedPrivateClipboardQuarantine.arm(
                 fingerprint = null,
                 timestamp = null,
@@ -152,7 +174,6 @@ object ClipboardHelper :
             )
             return
         }
-        val clip = result.getOrNull()
         if (clip == null) {
             delayedPrivateClipboardQuarantine.clear()
             return
@@ -165,7 +186,7 @@ object ClipboardHelper :
     }
 
     private fun ClipData.timestampOrNull(): Long? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-        runCatching { description.timestamp }.getOrNull()?.takeIf { it > 0L }
+        ClipboardReadSafety.readOrNull { description.timestamp }?.takeIf { it > 0L }
     } else {
         null
     }
@@ -173,10 +194,15 @@ object ClipboardHelper :
     private fun publishCapturedBean(
         bean: DatabaseBean,
         permit: Long,
+        admission: Long,
+        replaceId: Int? = null,
     ) {
+        var update: ClipboardSuggestionState.Update<DatabaseBean>? = null
         PrivacyModeState.publishIfOrdinary(permit) {
-            updateLastBean(bean)
+            val epoch = checkNotNull(PrivacyModeState.observeOrdinaryPersistence())
+            update = suggestionState.publish(admission, bean, epoch) { replaceId == null || lastBean?.id == replaceId }
         }
+        update?.let(::notifySuggestionChanged)
     }
 
     fun init(
@@ -191,9 +217,24 @@ object ClipboardHelper :
                     Room.inMemoryDatabaseBuilder(context, Database::class.java)
                 }
                 )
-                .addMigrations(Database.MIGRATION_3_4)
+                .addMigrations(Database.MIGRATION_3_4, Database.MIGRATION_4_5, Database.MIGRATION_5_6)
                 .build()
         clbDao = clbDb.databaseDao()
+        try {
+            ClipboardImageHistory.initialize(context, clbDb, persistHistory)
+        } catch (_: Exception) {
+            // A storage failure must not prevent the existing text clipboard from starting.
+            Timber.w("Image history storage is unavailable")
+        }
+        launch {
+            try {
+                ClipboardImageHistory.recoverAndEnable()
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                Timber.w("Image history recovery is unavailable")
+            }
+        }
         enabledListener.onChange(enabledPref.key, enabledPref.getValue())
         enabledPref.registerOnChangeListener(enabledListener)
         limitListener.onChange(limitPref.key, limitPref.getValue())
@@ -207,9 +248,72 @@ object ClipboardHelper :
 
     fun allBeans() = clbDao.allBeans()
 
+    fun searchBeans(query: String): androidx.paging.PagingSource<Int, DatabaseBean> {
+        require(query.length <= MAX_CLIPBOARD_SEARCH_UNITS) { "Clipboard search query exceeds limit" }
+        return if (query.isEmpty()) clbDao.allBeans() else clbDao.searchBeans(query)
+    }
+
+    internal fun acquirePrivateCopyTicket(): PrivateCopyHistoryTicket? = synchronized(listenerRegistrationLock) {
+        if (!listenerRegistered || com.osfans.trime.TrimeApplication.getInstance().isDirectBootMode) return@synchronized null
+        PrivateCopyHistoryTicket().also(privateCopyTickets::add)
+    }
+
+    internal fun releasePrivateCopyTicket(ticket: PrivateCopyHistoryTicket) {
+        ticket.cancel()
+        synchronized(listenerRegistrationLock) { privateCopyTickets.remove(ticket) }
+    }
+
+    /** Store an explicitly selected text value without reading or writing Android's clipboard. */
+    internal suspend fun savePrivateCopy(text: String, epoch: Long, ticket: PrivateCopyHistoryTicket, repeatEvent: Long, allowed: () -> Boolean): Boolean {
+        if (!listenerRegistered || text.isEmpty() || text.length > 65536) return false
+        val permit = clipboardPersistenceGate.acquire(isSensitive = false, observedEpoch = epoch) ?: return false
+        try {
+            return mutex.withLock {
+                val rules = clipboardRules.get(clipPref.clipboardCompareRules.getValue(), clipPref.clipboardOutputRules.getValue())
+                    ?: return@withLock false
+                if (!rules.accepts(text)) return@withLock false
+                val existing = clbDao.find(text)
+                val now = System.currentTimeMillis()
+                val saved = clbDb.withTransaction {
+                    clipboardPersistenceGate.guardTransaction(permit) {
+                        if (!listenerRegistered || !PrivacyModeState.claimIfOrdinaryEpoch(epoch) { allowed() && ticket.claimWrite() }) return@guardTransaction false
+                        if (existing != null) {
+                            clbDao.updateTime(existing.id, now)
+                        } else {
+                            clbDao.insert(DatabaseBean(text = text, time = now))
+                        }
+                        true
+                    }
+                }
+                if (saved) {
+                    removeOutdated()
+                    updateItemCount()
+                    val id = clbDao.find(text)?.id
+                    val digest = clipboardRepeatDigest(text)
+                    if (id != null) PrivacyModeState.publishIfOrdinary(permit) {
+                        if (listenerRegistered && allowed()) repeatState.accepted(repeatEvent, id, digest)
+                    }
+                }
+                saved
+            }
+        } finally {
+            clipboardPersistenceGate.release(permit)
+        }
+    }
+
     suspend fun pin(id: Int) = clbDao.updatePinned(id, true)
 
     suspend fun unpin(id: Int) = clbDao.updatePinned(id, false)
+
+    private suspend fun <T> withRepeatRowMutation(id: Int, block: suspend () -> T): T {
+        repeatState.beginRowMutation(id)
+        try { return block() } finally { repeatState.endRowMutation(id) }
+    }
+
+    private suspend fun <T> withRepeatAllMutation(invalidateEvent: Boolean = true, block: suspend () -> T): T {
+        repeatState.beginAllMutation(invalidateEvent)
+        try { return block() } finally { repeatState.endAllMutation() }
+    }
 
     /** Missing rows are a normal edit outcome; only a committed single-row update is published. */
     suspend fun updateText(
@@ -219,7 +323,7 @@ object ClipboardHelper :
         val permit = clipboardPersistenceGate.acquire(isSensitive = false)
             ?: throw PersistencePermitExpiredException()
         try {
-            return mutex.withLock {
+            return withRepeatRowMutation(id) { mutex.withLock {
                 val existing = clbDao.get(id) ?: return@withLock TextUpdateResult.NOT_FOUND
                 val updated = existing.copy(text = text)
                 val outcome = clbDb.withTransaction {
@@ -232,29 +336,32 @@ object ClipboardHelper :
                     }
                 }
                 if (outcome == TextUpdateResult.SAVED) {
-                    PrivacyModeState.publishIfOrdinary(permit) {
-                        if (lastBean?.id == id) updateLastBean(updated)
-                    }
+                    val admission = suggestionState.admit()
+                    if (admission != null) publishCapturedBean(updated, permit, admission, replaceId = id)
                 }
                 outcome
-            }
+            } }
         } finally {
             clipboardPersistenceGate.release(permit)
         }
     }
 
     suspend fun delete(id: Int) {
-        clbDao.delete(id)
-        updateItemCount()
+        withRepeatRowMutation(id) {
+            clbDao.delete(id)
+            updateItemCount()
+        }
     }
 
     suspend fun deleteAll(skipUnpinned: Boolean = true) {
-        if (skipUnpinned) {
-            clbDao.deleteAllUnpinned()
-        } else {
-            clbDao.deleteAll()
+        withRepeatAllMutation {
+            if (skipUnpinned) {
+                clbDao.deleteAllUnpinned()
+            } else {
+                clbDao.deleteAll()
+            }
+            updateItemCount()
         }
-        updateItemCount()
     }
 
     private var lastClipTimestamp = -1L
@@ -263,103 +370,183 @@ object ClipboardHelper :
     /**
      * 此方法设置监听剪贴板变化，如有新的剪贴内容，就启动选定的剪贴板管理器
      *
-     * - [compareRules] 比较规则。每次通知剪贴板管理器，都会保存 ClipBoardCompare 处理过的 string。
-     * 如果两次处理过的内容不变，则不通知。
-     *
-     * - [outputRules] 输出规则。如果剪贴板内容与规则匹配，则不通知剪贴板管理器。
+     * 比较规则去除后为空或完整匹配输出规则的内容不会保存。规则错误时不保存，直到修正。
      */
     override fun onPrimaryClipChanged() {
-        if (!listenerRegistered) {
+        val repeatEvent = repeatState.invalidate()
+        // Invalidate prior image reads even for disabled, empty or sensitive clipboard events.
+        val imageEvent = imageEvents.advance()
+        val admission = suggestionState.admit() ?: run {
             AppOwnedSensitiveClipboard.discardPending()
             return
         }
         val observedEpoch = PrivacyModeState.observeOrdinaryPersistence()
         if (observedEpoch == null) {
             AppOwnedSensitiveClipboard.discardPending()
-            clearTransientSuggestion()
+            clearCapturedSuggestion(admission)
             return
         }
-        val clip =
-            clipboardManager.primaryClip ?: run {
+        // Snapshot the event and privacy epoch before the only system clipboard read.
+        var imageAuthorization = imageEvents.acquireAuthorization(imageEvent) {
+            listenerRegistered && PrivacyModeState.isOrdinaryEpoch(observedEpoch)
+        }
+        try {
+            val clip = try {
+                clipboardManager.primaryClip
+            } catch (failure: RuntimeException) {
+                if (failure is kotlinx.coroutines.CancellationException || failure is PersistencePermitExpiredException) throw failure
                 AppOwnedSensitiveClipboard.discardPending()
-                delayedPrivateClipboardQuarantine.clear()
+                clearCapturedSuggestion(admission)
+                return
+            } ?: run {
+                    AppOwnedSensitiveClipboard.discardPending()
+                    delayedPrivateClipboardQuarantine.clear()
+                    return
+                }
+            val fingerprint = ClipboardContentIdentity.sha256OrNull(clip)
+            val appOwnedSensitive = AppOwnedSensitiveClipboard.consumeIfOwned(fingerprint)
+            val delayedPrivate =
+                delayedPrivateClipboardQuarantine.shouldSuppress(
+                    fingerprint = fingerprint,
+                    timestamp = clip.timestampOrNull(),
+                )
+            if (appOwnedSensitive || delayedPrivate) {
+                clearCapturedSuggestion(admission)
                 return
             }
-        val fingerprint = ClipboardContentIdentity.sha256OrNull(clip)
-        val appOwnedSensitive = AppOwnedSensitiveClipboard.consumeIfOwned(fingerprint)
-        val delayedPrivate =
-            delayedPrivateClipboardQuarantine.shouldSuppress(
-                fingerprint = fingerprint,
-                timestamp = clip.timestampOrNull(),
-            )
-        if (appOwnedSensitive || delayedPrivate) {
-            clearTransientSuggestion()
-            return
-        }
-        if (SensitiveClipboardCompat.isSensitive(clip.description)) {
-            clearTransientSuggestion()
-            return
-        }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val timestamp = clip.description.timestamp
-            if (timestamp == lastClipTimestamp) return
-            lastClipTimestamp = timestamp
-        } else {
-            val timestamp = System.currentTimeMillis()
-            val hash = clip.hashCode()
-            if (timestamp - lastClipTimestamp < 100L && hash == lastClipHash) return
-            lastClipTimestamp = timestamp
-            lastClipHash = hash
-        }
-        val permit = clipboardPersistenceGate.acquire(
-            isSensitive = false,
-            observedEpoch = observedEpoch,
-        ) ?: run {
-            clearTransientSuggestion()
-            return
-        }
-        launch {
-            try {
-                mutex.withLock {
-                    val bean = DatabaseBean.fromClipData(clip) ?: return@withLock
-                    if (bean.text.isNullOrBlank()) return@withLock
-                    if (bean.text.matchesAny(outputRules) ||
-                        bean.text.removeRegexSet(compareRules).isEmpty()
-                    ) {
-                        return@withLock
+            if (ClipboardReadSafety.sensitiveOrUnreadable(clip)) {
+                clearCapturedSuggestion(admission)
+                return
+            }
+            // The platform can deliver the same clipboard update more than once.
+            // Every callback first revoked the old selection. Restore it only after
+            // proving this is the same ordinary, bounded text event in the same epoch.
+            val repeatTimestamp = clip.timestampOrNull()
+            val repeatDigest = ClipboardReadSafety.readOrNull {
+                if (clip.itemCount != 1) return@readOrNull null
+                val item = clip.getItemAt(0)
+                if (item.uri != null || item.intent != null) return@readOrNull null
+                val value = item.text ?: return@readOrNull null
+                if (value.length > 65536) return@readOrNull null
+                val text = value.toString()
+                if (text.length > 65536) null else clipboardRepeatDigest(text)
+            }
+            if (repeatTimestamp != null && repeatDigest != null) {
+                PrivacyModeState.claimIfOrdinaryEpoch(observedEpoch) {
+                    synchronized(repeatIdentityLock) {
+                        val previous = lastRepeatIdentity
+                        if (previous != null && previous.timestamp == repeatTimestamp && previous.digest == repeatDigest &&
+                            previous.epoch == observedEpoch
+                        ) repeatState.coalesce(previous.event, repeatEvent, repeatDigest)
+                        lastRepeatIdentity = RepeatEventIdentity(repeatTimestamp, repeatDigest, observedEpoch, repeatEvent)
                     }
-                    clbDao.find(bean.text)?.let { existing ->
-                        val refreshed =
-                            clbDb.withTransaction {
-                                clipboardPersistenceGate.guardTransaction(permit) {
-                                    clbDao.updateTime(existing.id, bean.time)
-                                    existing.copy(time = bean.time)
+                    true
+                }
+            }
+            val imageCapture = ClipboardImageHistory.captureOrNull()
+            val imageAuth = imageAuthorization
+            if (imageCapture != null && imageAuth != null && mayContainImageUri(clip)) {
+                // tryStart takes ownership, including when its pre-scheduling slot limit rejects.
+                imageAuthorization = null
+                try {
+                    imageCapture.tryStart(this, clip, imageAuth, onResult = {}, onFailure = {})
+                } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    // A scheduling failure must not interrupt the independent text history path.
+                }
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val timestamp = ClipboardReadSafety.readOrNull { clip.description.timestamp } ?: return
+                if (timestamp == lastClipTimestamp) return
+                lastClipTimestamp = timestamp
+            } else {
+                val timestamp = System.currentTimeMillis()
+                val hash = clip.hashCode()
+                if (timestamp - lastClipTimestamp < 100L && hash == lastClipHash) return
+                lastClipTimestamp = timestamp
+                lastClipHash = hash
+            }
+            val permit = clipboardPersistenceGate.acquire(
+                isSensitive = false,
+                observedEpoch = observedEpoch,
+            ) ?: run {
+                clearCapturedSuggestion(admission)
+                return
+            }
+            launch {
+                try {
+                    mutex.withLock {
+                        val bean = DatabaseBean.fromClipData(clip) ?: return@withLock
+                        val text = bean.text ?: return@withLock
+                        val rules = clipboardRules.get(
+                            clipPref.clipboardCompareRules.getValue(),
+                            clipPref.clipboardOutputRules.getValue(),
+                        ) ?: run {
+                            Timber.w("Clipboard rules are invalid; skipping capture")
+                            clearCapturedSuggestion(admission)
+                            return@withLock
+                        }
+                        if (!rules.accepts(text)) {
+                            return@withLock
+                        }
+                        clbDao.find(text)?.let { existing ->
+                            val refreshed =
+                                clbDb.withTransaction {
+                                    clipboardPersistenceGate.guardTransaction(permit) {
+                                        clbDao.updateTime(existing.id, bean.time)
+                                        existing.copy(time = bean.time)
+                                    }
+                                }
+                            publishCapturedBean(refreshed, permit, admission)
+                            if (text.length <= 65536) {
+                                val digest = clipboardRepeatDigest(text)
+                                PrivacyModeState.publishIfOrdinary(permit) {
+                                    if (listenerRegistered) repeatState.accepted(repeatEvent, refreshed.id, digest)
                                 }
                             }
-                        publishCapturedBean(refreshed, permit)
-                        return@withLock
-                    }
-                    val insertedBean =
-                        clbDb.withTransaction {
-                            clipboardPersistenceGate.guardTransaction(permit) {
-                                val rowId = clbDao.insert(bean)
-                                val id = rowId.toInt()
-                                clbDao.get(rowId) ?: bean.copy(id = id)
+                            return@withLock
+                        }
+                        val insertedBean =
+                            clbDb.withTransaction {
+                                clipboardPersistenceGate.guardTransaction(permit) {
+                                    val rowId = clbDao.insert(bean)
+                                    val id = rowId.toInt()
+                                    clbDao.get(rowId) ?: bean.copy(id = id)
+                                }
+                            }
+                        removeOutdated()
+                        updateItemCount()
+                        publishCapturedBean(insertedBean, permit, admission)
+                        if (text.length <= 65536) {
+                            val digest = clipboardRepeatDigest(text)
+                            PrivacyModeState.publishIfOrdinary(permit) {
+                                if (listenerRegistered) repeatState.accepted(repeatEvent, insertedBean.id, digest)
                             }
                         }
-                    removeOutdated()
-                    updateItemCount()
-                    publishCapturedBean(insertedBean, permit)
+                    }
+                } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                    throw cancelled
+                } catch (_: PersistencePermitExpiredException) {
+                    // Room rolled the transaction back; never publish the rejected content.
+                } catch (exception: Exception) {
+                    Timber.w("Failed to update clipboard database: $exception")
                 }
-            } catch (_: PersistencePermitExpiredException) {
-                // Room rolled the transaction back; never publish the rejected content.
-            } catch (exception: Exception) {
-                Timber.w("Failed to update clipboard database: $exception")
+            }.invokeOnCompletion {
+                // Completion handlers also run when a coroutine is cancelled before its body starts.
+                clipboardPersistenceGate.release(permit)
             }
-        }.invokeOnCompletion {
-            // Completion handlers also run when a coroutine is cancelled before its body starts.
-            clipboardPersistenceGate.release(permit)
+        } finally {
+            imageAuthorization?.close()
         }
+    }
+
+    /** A cheap, defensive filter; actual MIME, URI and permission checks run in the worker. */
+    private fun mayContainImageUri(clip: ClipData): Boolean = try {
+        clip.itemCount == 1 && clip.getItemAt(0).let { it.uri != null && it.intent == null }
+    } catch (failure: RuntimeException) {
+        if (failure is kotlinx.coroutines.CancellationException || failure is PersistencePermitExpiredException) throw failure
+        false
     }
 
     private suspend fun removeOutdated() {
@@ -370,7 +557,7 @@ object ClipboardHelper :
                 unpinned
                     .sortedBy { it.id }
                     .getOrNull(unpinned.size - limit)
-            clbDao.deletedUnpinnedEarlierThan(outdated?.time ?: System.currentTimeMillis())
+            withRepeatAllMutation(invalidateEvent = false) { clbDao.deletedUnpinnedEarlierThan(outdated?.time ?: System.currentTimeMillis()) }
         }
     }
 }

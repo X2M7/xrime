@@ -27,7 +27,7 @@ object T9LayoutPolicy {
     }
 
     /** Ownership comes from the page/return route, never from empty or changing input text. */
-    fun usesCompositionPanel(t9Layout: Boolean, symbols: Boolean, restricted: Boolean, originIsT9: Boolean, sameSchema: Boolean): Boolean = t9Layout || (symbols && !restricted && originIsT9 && sameSchema)
+    fun usesCompositionPanel(t9Layout: Boolean, auxiliary: Boolean, restricted: Boolean, originIsT9: Boolean, sameSchema: Boolean): Boolean = t9Layout || (auxiliary && !restricted && originIsT9 && sameSchema)
 
     fun modelHeight(requested: Int, maximum: Int, minimum: Int = 192): Int = if (maximum > 0) minOf(requested, maxOf(minimum, maximum)) else requested
 

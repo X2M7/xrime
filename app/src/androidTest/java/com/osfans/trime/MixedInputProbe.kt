@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 package com.osfans.trime
 
-// This file has not been compiled or executed; baseline paths need device verification.
+// Baseline and fixed-task results are recorded separately for device comparison.
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.Instrumentation
@@ -56,6 +56,7 @@ import com.osfans.trime.util.virtualKeyCharacterMap
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
@@ -345,6 +346,26 @@ object MixedInputProbe {
             .apply { isAccessible = true }.get(window()) as String
 
         suspend fun until(predicate: () -> Boolean) = withTimeout(30_000) { while (!main(predicate)) delay(50) }
+
+        suspend fun awaitRestrictedEditor(expectedType: Int) {
+            val identityMask = InputType.TYPE_MASK_CLASS or InputType.TYPE_MASK_VARIATION
+            val requiredFlags = expectedType and InputType.TYPE_MASK_FLAGS
+            try {
+                until {
+                    val actual = service.currentInputEditorInfo?.inputType
+                    input() != null && service.currentInputEditorInfo?.fieldId == restricted.id &&
+                        actual != null && (actual and identityMask) == (expectedType and identityMask) &&
+                        (actual and requiredFlags) == requiredFlags
+                }
+            } catch (failure: TimeoutCancellationException) {
+                val state = main {
+                    val info = service.currentInputEditorInfo
+                    "inputPresent=${input() != null}, fieldMatches=${info?.fieldId == restricted.id}, " +
+                        "expectedType=0x${expectedType.toString(16)}, actualType=${info?.inputType?.let { "0x${it.toString(16)}" } ?: "null"}"
+                }
+                throw IllegalStateException("Timed out waiting for restricted editor: $state", failure)
+            }
+        }
 
         suspend fun <T> api(block: suspend RimeApi.() -> T): T {
             var outcome: Result<T>? = null
@@ -692,7 +713,8 @@ object MixedInputProbe {
             val before = settled()
             val choice = main {
                 descendants(checkNotNull(input())).filterIsInstance<T9DisambiguationView>()
-                    .flatMap(::descendants).filterIsInstance<TextView>().singleOrNull {
+                    .flatMap { panel -> sequenceOf(panel, panel.sidebar).flatMap(::descendants) }
+                    .filterIsInstance<RecyclerView>().flatMap { it.children }.filterIsInstance<TextView>().singleOrNull {
                         it.isShown && it.isEnabled && it.contentDescription?.toString() == "ni" && it.hasOnClickListeners()
                     }
             } ?: throw Unsupported("Exact ni syllable choice is not currently visible")
@@ -815,7 +837,7 @@ object MixedInputProbe {
                     manager.restartInput(restricted)
                     manager.showSoftInput(restricted, 0)
                 }
-                until { input() != null && service.currentInputEditorInfo?.fieldId == restricted.id && service.currentInputEditorInfo?.inputType == item.inputType }
+                awaitRestrictedEditor(item.inputType)
             }
             prepared = settled().put("manual_language_preference", manualPreference?.state() ?: JSONObject.NULL)
                 .put("effective_theme_sha256", effectiveThemes.getJSONObject(theme).getString("effective_theme_sha256"))
@@ -1017,7 +1039,7 @@ object MixedInputProbe {
                 check(prepared.getString("raw_input").isEmpty() && !prepared.getBoolean("ascii_mode") && prepared.getBoolean("t9_layout"))
                 val entered = CompletableDeferred<Unit>()
                 val release = CompletableDeferred<Unit>()
-                val gateProof = json("original_service_post_rime_job" to true, "single_main_dispatch" to true)
+                val gateProof = json("original_service_post_rime_job" to true, "single_main_dispatch" to false, "layout_frame_waits" to true)
                 item.put("gate", gateProof)
                 val gate = main {
                     service.postRimeJob {
@@ -1028,7 +1050,7 @@ object MixedInputProbe {
                 }
                 try {
                     withTimeout(5_000) { entered.await() }
-                    main {
+                    val anchor = main {
                         val anchor = rapidIdentity()
                         check(
                             anchor.getLong("editor_token") == prepared.getLong("editor_token") &&
@@ -1055,7 +1077,41 @@ object MixedInputProbe {
                         gateProof.put("pending_english_shift_survived_old_chinese_notification", true)
                         gateProof.put("shift_control_driver", "fixture_modifier_setup_and_direct_option_callback")
                         keyboard().setShifted(false, false)
-                        val a = visibleKeys().singleOrNull { it.behavior == KeyBehavior.CLICK && it.action.code == KeyEvent.KEYCODE_A && outputOf(it.action) == "a" }
+                        val activeView = descendants(checkNotNull(input())).filterIsInstance<KeyboardView>().singleOrNull { it.isShown }
+                        val candidates = JSONArray()
+                        keyboard().keys.forEachIndexed { index, key ->
+                            val action = key.getAction(KeyBehavior.CLICK)
+                            if (action?.code == KeyEvent.KEYCODE_A) {
+                                val view = activeView?.getChildAt(index) as? KeyView
+                                val rect = Rect()
+                                candidates.put(json(
+                                    "index" to index, "output" to outputOf(action), "label" to key.getLabel(),
+                                    "attached" to (view?.isAttachedToWindow ?: false), "shown" to (view?.isShown ?: false),
+                                    "width" to (view?.width ?: -1), "height" to (view?.height ?: -1),
+                                    "visible_rect" to (view?.getLocalVisibleRect(rect) == true),
+                                ))
+                            }
+                        }
+                        gateProof.put("immediate_a_candidates", candidates)
+                        anchor
+                    }
+                    suspend fun awaitVisibleKey(label: String, predicate: (VisibleKey) -> Boolean) {
+                        val started = SystemClock.uptimeMillis()
+                        val found = kotlinx.coroutines.withTimeoutOrNull(5_000) {
+                            while (true) {
+                                check(!release.isCompleted) { "Native queue gate released while waiting for $label" }
+                                if (visibleKeys().any(predicate)) break
+                                delay(25)
+                            }
+                            true
+                        } ?: false
+                        gateProof.put("${label}_layout_wait_ms", SystemClock.uptimeMillis() - started)
+                        check(found) { "No actual visible $label key while the native queue remained blocked" }
+                    }
+                    fun isVisibleA(key: VisibleKey) = key.behavior == KeyBehavior.CLICK && key.action.code == KeyEvent.KEYCODE_A && outputOf(key.action) == "a"
+                    awaitVisibleKey("ascii_a", ::isVisibleA)
+                    main {
+                        val a = visibleKeys().singleOrNull(::isVisibleA)
                             ?: throw Unsupported("No actual visible lowercase a key", "rapid_letter_route_unavailable")
                         rapidKey(a, "ascii_a", anchor, release)
                         val chinese = visibleKeys().singleOrNull {
@@ -1067,7 +1123,10 @@ object MixedInputProbe {
                         // is queued; record that actual action rather than inventing an override.
                         rapidKey(chinese, "chinese", anchor, release)
                         check(keyboard().isT9Layout) { "Accepted Chinese command did not expose schema-native T9" }
-                        if (withChinese) {
+                    }
+                    if (withChinese) {
+                        awaitVisibleKey("native_6") { it.behavior == KeyBehavior.CLICK && it.action.code == KeyEvent.KEYCODE_6 }
+                        main {
                             for (digit in "64") {
                                 val key = visibleKeys().singleOrNull { it.behavior == KeyBehavior.CLICK && it.action.code == KeyEvent.KEYCODE_0 + (digit - '0') }
                                     ?: throw Unsupported("No actual visible T9 $digit key", "rapid_digit_route_unavailable")
@@ -1321,7 +1380,7 @@ object MixedInputProbe {
                     manager.restartInput(restricted)
                     manager.showSoftInput(restricted, 0)
                 }
-                until { service.currentInputEditorInfo?.fieldId == restricted.id && service.currentInputEditorInfo?.inputType == type && input() != null }
+                awaitRestrictedEditor(type)
                 val forced = settled()
                 record("forced_$type", forced)
                 check(forced.getBoolean("ascii_mode")) { "Restricted real editor did not enter ASCII" }

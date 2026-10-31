@@ -55,7 +55,9 @@ sealed interface DataDiff {
             .apply {
                 addAll(
                     old.files
-                        .filterKeys { it !in new.files }
+                        // Older descriptors included the assets root and unrelated files.
+                        // They were never installed under sharedDir and must not be deleted there.
+                        .filterKeys { it.startsWith("shared/") && it !in new.files }
                         .map { (path, sha256) ->
                             if (sha256.isNotBlank()) DeleteFile(path) else DeleteDir(path)
                         },

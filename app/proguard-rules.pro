@@ -10,6 +10,7 @@
 
 # Keep JNI interface
 -keep class com.osfans.trime.core.* { *; }
+-keep class com.osfans.trime.data.soundeffect.SoundFileAccess { *; }
 
 # The separately compiled acceptance APK calls these production entry points.
 # Preserve their JVM signatures while the remaining Release code stays optimized.

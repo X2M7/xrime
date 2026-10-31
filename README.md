@@ -4,6 +4,19 @@ SPDX-FileCopyrightText: 2015 - 2024 Rime community
 SPDX-License-Identifier: GPL-3.0-or-later
 -->
 
+# xrime
+
+xrime is an independent Android input method based on [Trime](https://github.com/osfans/trime) and [X2M7/trime](https://github.com/X2M7/trime). Its application ID is `com.x2m7.xrime`, so it can be installed alongside Trime. Existing private data is not migrated automatically.
+
+The first release is an **alpha prerelease**. It is not a production-ready replacement: some upstream issues remain open, full lint still reports build-plugin upgrade notices, and a known sound-pack directory scan can crash under particular filename and Android runtime conditions. See the [verification record](docs/xrime-verification.md) and [upstream issue checklist](docs/xrime-upstream-issues.md).
+
+Release APKs target Android 5.0 or later and are provided separately for ARM64 and x86_64. Back up dictionaries and configuration before testing. The project is licensed under [GPL-3.0-or-later](LICENSE).
+
+[简体中文](README_sc.md) · [Releases](https://github.com/X2M7/xrime/releases)
+
+<details>
+<summary>Historical X2M7/trime README (not xrime release claims)</summary>
+
 # Trime
 
 Rime IME for Android
@@ -206,3 +219,5 @@ Other issues:
 [Android Traditional Chinese IME]: https://code.google.com/p/android-traditional-chinese-ime/
 [RIME]: http://rime.im
 [OpenCC]: https://github.com/BYVoid/OpenCC
+
+</details>

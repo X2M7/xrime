@@ -16,6 +16,8 @@ object ColorPickerDialog {
     suspend fun build(
         scope: LifecycleCoroutineScope,
         context: Context,
+        ownerActive: () -> Boolean = { true },
+        reportFailure: (Exception) -> Unit = {},
         afterConfirm: (suspend () -> Unit)? = null,
     ): AlertDialog {
         ThemeManager.init(context.resources.configuration)
@@ -34,11 +36,18 @@ object ColorPickerDialog {
                         currentIndex,
                     ) { dialog, which ->
                         scope.launch {
-                            afterConfirm?.invoke()
-                            if (which != currentIndex) {
-                                ColorManager.setColorScheme(presetSchemes[which].key)
+                            try {
+                                presentColorPicker(
+                                    create = { afterConfirm?.invoke() },
+                                    ownerActive = ownerActive,
+                                    present = {
+                                        if (which != currentIndex) ColorManager.setColorScheme(presetSchemes[which].key)
+                                    },
+                                    reportFailure = reportFailure,
+                                )
+                            } finally {
+                                dialog.dismiss()
                             }
-                            dialog.dismiss()
                         }
                     }
                 }

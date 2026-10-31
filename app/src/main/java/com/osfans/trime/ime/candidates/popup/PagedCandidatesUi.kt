@@ -111,6 +111,7 @@ class PagedCandidatesUi(
                     is UiHolder.Pagination -> {
                         val page = candidates
                         holder.snapshot = page.snapshot
+                        holder.ui.setVerticalLayout(!isHorizontal)
                         holder.ui.update(page, { onPrevPage.invoke(page.snapshot) }, { onNextPage.invoke(page.snapshot) })
                         holder.ui.root.updateLayoutParams<FlexboxLayoutManager.LayoutParams> {
                             flexGrow = 1f

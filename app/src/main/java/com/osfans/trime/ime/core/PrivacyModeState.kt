@@ -10,7 +10,7 @@ object PrivacyModeState {
 
     private var nextPersistencePermit = 1L
 
-    private val persistencePermits = mutableSetOf<Long>()
+    private val persistencePermits = mutableMapOf<Long, Long>()
 
     @Volatile
     private var snapshot = Snapshot()
@@ -160,7 +160,8 @@ object PrivacyModeState {
         if (snapshot.active || (expectedEpoch != null && snapshot.epoch != expectedEpoch)) return null
         val permit = nextPersistencePermit
         nextPersistencePermit = if (permit == Long.MAX_VALUE) 1L else permit + 1L
-        check(persistencePermits.add(permit)) { "Persistence permit collision" }
+        check(permit !in persistencePermits) { "Persistence permit collision" }
+        persistencePermits[permit] = snapshot.epoch
         return permit
     }
 
@@ -181,9 +182,24 @@ object PrivacyModeState {
         permit: Long,
         publish: () -> Unit,
     ): Boolean = synchronized(lock) {
-        if (snapshot.active || permit !in persistencePermits) return@synchronized false
+        if (snapshot.active || persistencePermits[permit] != snapshot.epoch) return@synchronized false
         publish()
         true
+    }
+
+    /** Persistence permits remain live across a boundary, but retain their issuing generation. */
+    fun isPersistencePermitFromEpoch(permit: Long, epoch: Long): Boolean = synchronized(lock) {
+        persistencePermits[permit] == epoch
+    }
+
+    /** True only while the exact ordinary editor/privacy generation remains current. */
+    fun isOrdinaryEpoch(epoch: Long): Boolean = synchronized(lock) {
+        !snapshot.active && snapshot.epoch == epoch
+    }
+
+    /** Claim a nonblocking operation atomically against this privacy boundary. */
+    internal fun claimIfOrdinaryEpoch(epoch: Long, claim: () -> Boolean): Boolean = synchronized(lock) {
+        !snapshot.active && snapshot.epoch == epoch && claim()
     }
 
     fun releasePersistencePermit(permit: Long) {

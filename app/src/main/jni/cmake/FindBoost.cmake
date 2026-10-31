@@ -10,10 +10,10 @@ list(TRANSFORM BOOST_INCLUDE_LIBRARIES PREPEND Boost:: OUTPUT_VARIABLE
 file(
   GLOB __boost_installed_libs
   LIST_DIRECTORIES true
-  RELATIVE "${CMAKE_BINARY_DIR}"
+  RELATIVE "${CMAKE_BINARY_DIR}/boost/libs"
   "${CMAKE_BINARY_DIR}/boost/libs/*")
 
 foreach(__lib ${__boost_installed_libs})
-  set(__full_dir "${CMAKE_SOURCE_DIR}/${__lib}/include")
+  set(__full_dir "${BOOST_TREE}/libs/${__lib}/include")
   list(APPEND Boost_INCLUDE_DIRS "${__full_dir}")
 endforeach()

@@ -51,6 +51,9 @@ sealed class BoardWindow(override val di: DI) : DIAware {
      */
     open fun refreshColors() {}
 
+    /** Clear content owned by the prior editor or a hidden input view. */
+    open fun onInputBoundary() {}
+
     abstract class NoBarBoardWindow(di: DI) : BoardWindow(di) {
         override fun toString(): String = javaClass.name
     }

@@ -7,7 +7,10 @@ package com.osfans.trime.core.data
 import com.charleskorn.kaml.Yaml
 import com.osfans.trime.core.data.DataManager
 import com.osfans.trime.util.get
+import com.osfans.trime.util.DEFAULT_YAML_CODE_POINT_LIMIT
+import com.osfans.trime.util.readTextAtMostCodePoints
 import com.osfans.trime.util.string
+import kotlinx.coroutines.CancellationException
 import timber.log.Timber
 import java.io.File
 
@@ -140,16 +143,26 @@ object SyncPathPolicy {
 
     private fun readInstallationId(file: File): String? {
         if (!file.isFile) return null
-        return runCatching { readInstallationId(file.readText()) }
-            .onFailure { Timber.w(it, "Failed to read installation_id from ${file.path}") }
-            .getOrNull()
+        return try {
+            readInstallationId(file.readTextAtMostCodePoints(DEFAULT_YAML_CODE_POINT_LIMIT))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Timber.w(e, "Failed to read installation_id from ${file.path}")
+            null
+        }
     }
 
     private fun readSyncDir(file: File): String {
         if (!file.isFile) return DEFAULT_SYNC_DIR
-        return runCatching { readSyncDir(file.readText()) }
-            .onFailure { Timber.w(it, "Failed to read sync_dir from ${file.path}") }
-            .getOrDefault(DEFAULT_SYNC_DIR)
+        return try {
+            readSyncDir(file.readTextAtMostCodePoints(DEFAULT_YAML_CODE_POINT_LIMIT))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Timber.w(e, "Failed to read sync_dir from ${file.path}")
+            DEFAULT_SYNC_DIR
+        }
     }
 
     private fun cleanSyncDir(syncDir: String): String {

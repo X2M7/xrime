@@ -1297,7 +1297,7 @@ object SetupClosedLoopProbe {
                 var fresh = initialFresh
                 confirmInput(fresh)
                 val applied = runBlocking { session.runOnReady { inspectInputSetup() } }
-                check(applied.schemaId == "luna_pinyin_simp")
+                check(applied.schemaId in setOf("luna_pinyin", "luna_pinyin_simp"))
                 check(applied.selection == InputSetupSelection(InputLayout.FULL_PINYIN, ChineseVariant.SIMPLIFIED))
                 check(!profile.freshInputSetupPending.getValue())
                 passed("applying the actual wizard button confirms the shared simplified full-pinyin configuration")

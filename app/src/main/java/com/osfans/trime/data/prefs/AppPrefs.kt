@@ -322,12 +322,15 @@ class AppPrefs(
             const val INLINE_SUGGESTIONS = "inline_suggestions"
             const val PREFERRED_VOICE_INPUT = "preferred_voice_input"
             const val MANUAL_PRIVACY_MODE = "manual_privacy_mode"
+            const val LAST_FULL_PINYIN_SCHEMA = "last_full_pinyin_schema"
         }
 
         val inlinePreeditMode = enum(R.string.inline_preedit_mode, INLINE_PREEDIT_MODE, InlinePreeditMode.DISABLE)
         val asciiSwitchTips = switch(R.string.ascii_switch_tips, ASCII_SWITCH_TIPS, true)
         val inlineSuggestions = switch(R.string.inline_suggestions, INLINE_SUGGESTIONS, true)
         val manualPrivacyMode = switch(R.string.manual_privacy_mode, MANUAL_PRIVACY_MODE, false)
+        // A hidden input setting, mirrored for Direct Boot like the other input preferences.
+        val lastFullPinyinSchema = string(LAST_FULL_PINYIN_SCHEMA, "")
 
         val preferredVoiceInput = list(
             R.string.preferred_voice_input,
@@ -702,6 +705,8 @@ class AppPrefs(
             const val CLIPBOARD_SUGGESTION = "clipboard_suggestion"
             const val CLIPBOARD_SUGGESTION_TIMEOUT = "clipboard_suggestion_timeout"
             const val CLIPBOARD_RETURN_AFTER_PASTE = "clipboard_return_after_paste"
+            const val CLIPBOARD_REPEAT_SELECTION = "clipboard_repeat_selection"
+            const val CLIPBOARD_META_V = "clipboard_meta_v"
         }
         val clipboardListening = switch(R.string.clipboard_listening, CLIPBOARD_LISTENING, true)
         val clipboardLimit = int(
@@ -739,6 +744,10 @@ class AppPrefs(
             CLIPBOARD_RETURN_AFTER_PASTE,
             true,
         ) { clipboardListening.getValue() }
+        val clipboardRepeatSelection = switch(
+            R.string.clipboard_repeat_selection, CLIPBOARD_REPEAT_SELECTION, false, R.string.clipboard_repeat_selection_summary,
+        ) { clipboardListening.getValue() }
+        val clipboardMetaV = switch(R.string.clipboard_meta_v, CLIPBOARD_META_V, false, R.string.clipboard_meta_v_summary)
     }
 
     class Advanced(

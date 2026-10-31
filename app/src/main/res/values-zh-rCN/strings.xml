@@ -16,7 +16,7 @@
     <string name="clipboard_save_failed">保存失败，请重试。</string>
     <string name="clipboard_entry_removed">这条记录已被删除。</string>
     <!-- 输入法平台名称  -->
-    <string name="app_name_release">同文输入法</string>
+    <string name="app_name_release">xrime</string>
     <string name="qq_group_1">同文 QQ 群 1</string>
     <string name="qq_group_2">同文 QQ 群 2</string>
     <string name="rime_qq_group">中州韵 QQ 群</string>
@@ -25,6 +25,7 @@
     <string name="current_version">当前版本</string>
     <string name="license">许可证</string>
     <string name="privacy_policy">隐私策略</string>
+    <string name="theme_command_failed">无法执行此主题操作。</string>
     <string name="build_info_format">构建者：%1$s\n构建 Git 哈希：%2$s\n构建时间：%3$s</string>
     <string name="selected_theme">主题</string>
     <string name="selected_theme_summary">选取主题</string>
@@ -149,6 +150,22 @@
     <string name="open_source_licenses">开源软件许可</string>
     <string name="licenses_of_third_party_libraries">第三方软件库许可证</string>
     <string name="clipboard">剪贴板</string>
+    <string name="clipboard_images">图片</string>
+    <string name="clipboard_more_actions">剪贴板操作</string>
+    <string name="clipboard_text_editor">文本编辑面板</string>
+    <string name="private_copy_action">私有复制选中文字到本地历史</string>
+    <string name="private_copy_saved">已保存到本地历史，系统剪贴板未改变。</string>
+    <string name="private_copy_unavailable">无法将选中文字保存到剪贴历史。</string>
+    <string name="private_copy_too_large">选中文字过长，无法保存。</string>
+    <string name="clipboard_images_empty">没有保存的图片</string>
+    <string name="clipboard_images_page_failed">无法加载图片，点按重试。</string>
+    <string name="clipboard_images_unavailable">图片暂不可用，请返回此页重试。</string>
+    <string name="clipboard_image_description">图片 %1$d × %2$d。点按发送，长按管理。</string>
+    <string name="clipboard_image_target_unsupported">此编辑框无法接收该图片。</string>
+    <string name="clipboard_image_composition_pending">请先完成当前输入，再发送图片。</string>
+    <string name="clipboard_image_send_failed">无法发送图片，请重试。</string>
+    <string name="clipboard_image_load_failed">图片暂不可用，点按重试。</string>
+    <string name="clipboard_image_action_failed">无法更新图片，请重试。</string>
     <string name="collection">收藏夹</string>
     <string name="simple_key_unpin">取消置顶</string>
     <string name="simple_key_pin">置顶</string>
@@ -185,6 +202,7 @@
     <string name="no_theme_to_select">当前没有主题可选择。</string>
     <string name="theme_unavailable_fallback">主题“%1$s”不可用，已切换为“%2$s”。</string>
     <string name="no_color_to_select">当前没有配色方案可选择。</string>
+    <string name="color_scheme_unavailable">无法加载或应用配色方案，请重试。</string>
     <string name="no_effect_to_select">当前没有按键音效可选择。</string>
     <string name="setup_channel">设置向导</string>
     <string name="forget_this_word">忘记该词</string>
@@ -298,4 +316,19 @@
     <string name="t9_source_missing">漏按</string>
     <string name="t9_source_repeat">重复</string>
     <string name="t9_suggestion_source">%1$s（%2$s）</string>
+
+    <string name="clipboard_search">搜索剪贴板</string>
+    <string name="clipboard_search_hint">搜索剪贴板历史</string>
+    <string name="clipboard_search_results">搜索结果</string>
+    <string name="clipboard_search_cancel">取消</string>
+    <string name="clipboard_search_no_results">没有匹配的剪贴板记录</string>
+    <string name="clipboard_search_finish_composition">请先完成当前输入</string>
+    <string name="clipboard_search_unavailable">暂时无法搜索剪贴板</string>
+    <string name="clipboard_search_clear">显示全部剪贴板记录</string>
+    <string name="clipboard_repeat_selection">拦截 Ctrl+V 时重复粘贴选中的剪贴板内容</string>
+    <string name="clipboard_repeat_selection_summary">需开启 Ctrl+V 拦截；粘贴前请结束组合输入。不可用或敏感内容不会被使用。</string>
+    <string name="clipboard_meta_v">使用 Meta+V 打开剪贴板历史</string>
+    <string name="clipboard_meta_v_summary">仅当系统将此快捷键交给输入法时可用。</string>
+    <string name="clipboard_repeat_unavailable">请先结束组合输入，或重新选择可用的剪贴板内容。</string>
+    <string name="sound_effect_unavailable">自定义按键音效无法加载。请检查音频格式，将文件放在音效目录内，并确保单个文件不超过 16 MiB；将尝试使用系统按键音。</string>
 </resources>

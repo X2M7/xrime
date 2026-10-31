@@ -40,6 +40,14 @@ class StartupResponsivenessInstrumentation : Instrumentation() {
     private var safRevoke = false
     private var clipOnly = false
     private var clipSaveOnly = false
+    private var clipRealOnly = false
+    private var lunaPatchOnly = false
+    private var openccAtomicOnly = false
+    private var gap1438Only = false
+    private var ascii1635Only = false
+    private var customGeometryOnly = false
+    private var issue1915Only = false
+    private var preeditTouchOnly = false
     private var t02Only = false
     private var t03Only = false
     private var t03GeometryOnly = false
@@ -59,8 +67,12 @@ class StartupResponsivenessInstrumentation : Instrumentation() {
     private var failureOnly = false
     private var lateStorageOnly = false
     private var feedbackOnly = false
+    private var feedbackAudioOnly = false
     private var editorsOnly = false
+    private var textEditorPanelOnly = false
+    private var issue1879Only = false
     private var editorsAnimationCallbacks = true
+    private var editorsVisibilityOnly = false
     private var logResourcesOnly = false
     private var privacyOnly = false
     private var publicHostMode: String? = null
@@ -78,6 +90,14 @@ class StartupResponsivenessInstrumentation : Instrumentation() {
         safRevoke = arguments?.getString("safRevoke") == "true"
         clipOnly = arguments?.getString("clip") == "true"
         clipSaveOnly = arguments?.getString("clipSave") == "true"
+        clipRealOnly = arguments?.getString("clipReal") == "true"
+        lunaPatchOnly = arguments?.getString("lunaPatch") == "true"
+        openccAtomicOnly = arguments?.getString("openccAtomic") == "true"
+        gap1438Only = arguments?.getString("gap1438") == "true"
+        ascii1635Only = arguments?.getString("ascii1635") == "true"
+        customGeometryOnly = arguments?.getString("customGeometry") == "true"
+        issue1915Only = arguments?.getString("issue1915") == "true"
+        preeditTouchOnly = arguments?.getString("preeditTouch") == "true"
         t02Only = arguments?.getString("t02") == "true"
         t03Only = arguments?.getString("t03") == "true"
         t03GeometryOnly = arguments?.getString("t03GeometryOnly") == "true" || arguments?.getString("t05GeometryOnly") == "true"
@@ -97,8 +117,12 @@ class StartupResponsivenessInstrumentation : Instrumentation() {
         failureOnly = arguments?.getString("startupFailure") == "true"
         lateStorageOnly = arguments?.getString("lateStorage") == "true"
         feedbackOnly = arguments?.getString("feedback") == "true"
+        feedbackAudioOnly = arguments?.getString("feedbackAudio") == "true"
         editorsOnly = arguments?.getString("editors") == "true"
+        textEditorPanelOnly = arguments?.getString("textEditorPanel") == "true"
+        issue1879Only = arguments?.getString("issue1879") == "true"
         editorsAnimationCallbacks = arguments?.getString("editorsAnimationCallbacks") != "false"
+        editorsVisibilityOnly = arguments?.getString("editorsVisibilityOnly") == "true"
         logResourcesOnly = arguments?.getString("log_resources") == "true"
         privacyOnly = arguments?.getString("privacy") == "true"
         publicHostMode = arguments?.getString("public_host_mode")
@@ -152,8 +176,16 @@ class StartupResponsivenessInstrumentation : Instrumentation() {
             CandidateSnapshotProbe.run(this)
             return
         }
+        if (issue1879Only) {
+            Issue1879Probe.run(this)
+            return
+        }
+        if (textEditorPanelOnly) {
+            TextEditorPanelStandaloneProbe.run(this)
+            return
+        }
         if (editorsOnly) {
-            EditorLifecycleProbe.run(this, editorsAnimationCallbacks)
+            EditorLifecycleProbe.run(this, editorsAnimationCallbacks, editorsVisibilityOnly)
             return
         }
         if (logResourcesOnly) {
@@ -166,6 +198,10 @@ class StartupResponsivenessInstrumentation : Instrumentation() {
         }
         if (feedbackOnly) {
             InputFeedbackProbe.run(this)
+            return
+        }
+        if (feedbackAudioOnly) {
+            InputFeedbackProbe.run(this, audioOnly = true)
             return
         }
         if (failureOnly) {
@@ -198,6 +234,38 @@ class StartupResponsivenessInstrumentation : Instrumentation() {
         }
         if (clipSaveOnly) {
             ClipSaveProbe.run(this)
+            return
+        }
+        if (clipRealOnly) {
+            ClipboardCaptureEditProbe.run(this)
+            return
+        }
+        if (lunaPatchOnly) {
+            LunaEssayPatchProbe.run(this)
+            return
+        }
+        if (openccAtomicOnly) {
+            OpenCCAtomicProbe.run(this)
+            return
+        }
+        if (gap1438Only) {
+            Gap1438Probe.run(this)
+            return
+        }
+        if (ascii1635Only) {
+            Ascii1635Probe.run(this)
+            return
+        }
+        if (customGeometryOnly) {
+            CustomThemeGeometryProbe.run(this)
+            return
+        }
+        if (issue1915Only) {
+            Issue1915Probe.run(this)
+            return
+        }
+        if (preeditTouchOnly) {
+            PreeditTouchProbe.run(this)
             return
         }
         if (safOnly) {

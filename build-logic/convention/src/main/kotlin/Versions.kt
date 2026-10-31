@@ -4,6 +4,7 @@
 
 object Versions {
     const val DEFAULT_CMAKE = "3.31.6"
+    // Keep in sync with the verified CI installer until the newer NDK is audited.
     const val DEFAULT_NDK = "28.0.13004108"
 
     val supportedAbis = setOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")

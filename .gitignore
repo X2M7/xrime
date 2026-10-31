@@ -469,6 +469,12 @@ obj/
 ### Custom ###
 # Keystore
 keystore.properties
+*.p12
+*.pfx
+
+# Python bytecode
+__pycache__/
+*.py[cod]
 
 # Project
 app/src/main/assets/checksums.json

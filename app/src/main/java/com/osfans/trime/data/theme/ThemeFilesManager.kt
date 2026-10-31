@@ -7,7 +7,9 @@ package com.osfans.trime.data.theme
 
 import com.osfans.trime.core.data.DataManager
 import com.osfans.trime.util.get
+import com.osfans.trime.util.readTextAtMostCodePoints
 import com.osfans.trime.util.string
+import kotlinx.coroutines.CancellationException
 import timber.log.Timber
 import java.io.File
 
@@ -31,6 +33,7 @@ object ThemeFilesManager {
      */
     private fun readSourceName(configId: String, file: File): String? = runCatching { ThemeLoader.loadSourceNode(configId, file)?.get("name")?.string }
         .getOrElse { e ->
+            if (e is CancellationException) throw e
             Timber.w("Failed to decode theme file ${file.absolutePath}: ${e.message}")
             null
         }
@@ -39,8 +42,9 @@ object ThemeFilesManager {
     private fun readDeployedName(configId: String): String? {
         val file = File(DataManager.resolveDeployedResourcePath(configId))
         if (!file.isFile) return null
-        return runCatching { ThemeYaml.parser.parseToYamlNode(file.readText())["name"]?.string }
+        return runCatching { ThemeYaml.parser.parseToYamlNode(file.readTextAtMostCodePoints(ThemeYaml.CODE_POINT_LIMIT))["name"]?.string }
             .getOrElse { e ->
+                if (e is CancellationException) throw e
                 Timber.w("Failed to read deployed theme ${file.absolutePath}: ${e.message}")
                 null
             }

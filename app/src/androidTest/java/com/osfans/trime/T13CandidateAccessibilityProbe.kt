@@ -25,7 +25,9 @@ import com.osfans.trime.core.Candidates
 import com.osfans.trime.core.T9Action
 import com.osfans.trime.core.T9SpanProto
 import com.osfans.trime.core.T9StateProto
+import com.osfans.trime.data.prefs.AppPrefs
 import com.osfans.trime.data.theme.ThemeScope
+import com.osfans.trime.data.theme.model.GeneralStyle
 import com.osfans.trime.ime.candidates.BoundActionTextView
 import com.osfans.trime.ime.candidates.CandidateIdentity
 import com.osfans.trime.ime.candidates.CandidateItemUi
@@ -35,6 +37,7 @@ import com.osfans.trime.ime.candidates.popup.LabeledCandidateItemUi
 import com.osfans.trime.ime.candidates.popup.PaginationUi
 import com.osfans.trime.ime.composition.PreeditTextView
 import com.osfans.trime.ime.composition.T9DisambiguationView
+import splitties.dimensions.dp
 
 /** Real Android View node/action checks; this does not run or certify TalkBack. */
 internal object T13CandidateAccessibilityProbe {
@@ -112,6 +115,49 @@ internal object T13CandidateAccessibilityProbe {
         }
         candidate.root.identity = first
         candidate.update(CandidateProto(longText, "han yu", "1"), highlighted = true)
+        if (scope.theme.style.commentPosition == GeneralStyle.CommentPosition.RIGHT) {
+            // Issue #2138: a narrow candidate bar and a very long explanation
+            // must not place the beginning of the candidate outside the row.
+            val showComments = AppPrefs.defaultInstance().candidates.showComments
+            val wasShowingComments = showComments.getValue()
+            try {
+                showComments.setValue(true)
+                candidate.update(CandidateProto("搜狗", "Sogou; Chinese technology company known for its search engine and input method".repeat(3), "1"), highlighted = true)
+                val narrowWidth = context.dp(200)
+                candidate.root.measure(View.MeasureSpec.makeMeasureSpec(narrowWidth, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(host.height, View.MeasureSpec.AT_MOST))
+                candidate.root.layout(0, 0, narrowWidth, candidate.root.measuredHeight)
+                val content = candidate.root.getChildAt(0) as ViewGroup
+                val text = content.children.filterIsInstance<TextView>().first { it.text.toString() == "搜狗" }
+                val layout = checkNotNull(text.layout)
+                val start = content.left + text.left
+                val end = start + text.width
+                val textSpace = text.width - text.compoundPaddingLeft - text.compoundPaddingRight
+                // Single-line TextView may use a very wide internal Layout for
+                // scrolling; its primary-horizontal coordinates are not view coordinates.
+                verify("narrow-candidate-prefix-visible", start >= 0 && end <= narrowWidth &&
+                    textSpace >= text.paint.measureText(text.text.toString()) && layout.getEllipsisCount(0) == 0
+                ) {
+                    "textStart=$start textEnd=$end rowWidth=$narrowWidth textWidth=${text.width} textSpace=$textSpace " +
+                        "contentLeft=${content.left} contentWidth=${content.width} layoutWidth=${layout.width} " +
+                        "ellipsis=${layout.getEllipsisCount(0)}"
+                }
+                val longCandidate = "一段很长的候选文本用于检查首字符不会移出可见范围".repeat(3)
+                candidate.update(CandidateProto(longCandidate, "A long explanation ".repeat(12), "1"), highlighted = true)
+                candidate.root.measure(View.MeasureSpec.makeMeasureSpec(narrowWidth, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(host.height, View.MeasureSpec.AT_MOST))
+                candidate.root.layout(0, 0, narrowWidth, candidate.root.measuredHeight)
+                val longTextView = content.children.filterIsInstance<TextView>().first { it.text.toString() == longCandidate }
+                val longStart = content.left + longTextView.left
+                val longEnd = longStart + longTextView.width
+                verify("long-candidate-remains-in-row", longTextView.width > 0 && longStart >= 0 && longEnd <= narrowWidth) {
+                    "textStart=$longStart textEnd=$longEnd rowWidth=$narrowWidth"
+                }
+            } finally {
+                showComments.setValue(wasShowingComments)
+                candidate.update(CandidateProto(longText, "han yu", "1"), highlighted = true)
+                candidate.root.measure(View.MeasureSpec.makeMeasureSpec(host.width, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(host.height, View.MeasureSpec.AT_MOST))
+                candidate.root.layout(0, 0, host.width, candidate.root.measuredHeight)
+            }
+        }
         node(candidate.root) {
             verify("candidate-button-selected-full-text", it.className == "android.widget.Button" && it.isSelected && it.contentDescription?.toString()?.contains(longText) == true)
             verify("candidate-click-and-menu-actions", it.actionList.any { action -> action.id == AccessibilityNodeInfo.ACTION_CLICK } && it.actionList.any { action -> action.id == AccessibilityNodeInfo.ACTION_LONG_CLICK })
@@ -144,6 +190,17 @@ internal object T13CandidateAccessibilityProbe {
 
         val page = PaginationUi(context, scope)
         attach(page.root)
+        page.setVerticalLayout(true)
+        page.root.measure(View.MeasureSpec.makeMeasureSpec(host.width, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(host.height, View.MeasureSpec.AT_MOST))
+        page.root.layout(0, 0, host.width, page.root.measuredHeight)
+        verify("vertical-page-controls-large-and-separated", page.prevIcon.width == context.dp(56) &&
+            page.nextIcon.width == context.dp(56) && page.prevIcon.right + context.dp(8) <= page.nextIcon.left &&
+            page.prevIcon.paddingLeft == context.dp(12)
+        ) { "prev=${page.prevIcon.left}..${page.prevIcon.right}, next=${page.nextIcon.left}..${page.nextIcon.right}" }
+        page.setVerticalLayout(false)
+        page.root.measure(View.MeasureSpec.makeMeasureSpec(host.width, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(host.height, View.MeasureSpec.AT_MOST))
+        page.root.layout(0, 0, host.width, page.root.measuredHeight)
+        verify("horizontal-page-controls-retain-size", page.prevIcon.width == context.dp(48) && page.nextIcon.width == context.dp(48) && page.prevIcon.paddingLeft == 0)
         var nextPages = 0
         val paged = Candidates.Paged(hasNextPage = true).apply { snapshot = first.snapshot }
         page.update(paged, { error("Disabled previous page clicked") }, { nextPages++ })
@@ -160,6 +217,11 @@ internal object T13CandidateAccessibilityProbe {
             verify("next-page-action-label-is-unique", info.actionList.count { it.id == AccessibilityNodeInfo.ACTION_CLICK && it.label?.toString() == context.getString(R.string.a11y_next_candidates) } == 1) { pageDetails(page.nextIcon, info) }
         }
         verify("next-page-action-once", page.nextIcon.performAccessibilityAction(AccessibilityNodeInfo.ACTION_CLICK, null) && nextPages == 1)
+        page.setVerticalLayout(true)
+        page.root.measure(View.MeasureSpec.makeMeasureSpec(host.width, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(host.height, View.MeasureSpec.AT_MOST))
+        page.root.layout(0, 0, host.width, page.root.measuredHeight)
+        node(page.nextIcon) { }
+        verify("vertical-next-page-action-once", page.nextIcon.performAccessibilityAction(AccessibilityNodeInfo.ACTION_CLICK, null) && nextPages == 2)
 
         // Android's posted View click must not accidentally run a newly bound callback.
         val versioned = BoundActionTextView(ContextThemeWrapper(context, R.style.Theme_TrimeAppTheme))

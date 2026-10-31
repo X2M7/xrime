@@ -25,6 +25,8 @@ import com.osfans.trime.core.RimeMessage
 import com.osfans.trime.daemon.RimeSession
 import com.osfans.trime.daemon.launchOnReady
 import com.osfans.trime.data.db.ClipboardHelper
+import com.osfans.trime.data.db.ClipboardSuggestionState
+import com.osfans.trime.data.db.DatabaseBean
 import com.osfans.trime.data.prefs.AppPrefs
 import com.osfans.trime.data.theme.Theme
 import com.osfans.trime.data.theme.ThemeScope
@@ -88,28 +90,42 @@ class InputBarDelegate(override val di: DI) :
 
     private var inlineSuggestionJob: Job? = null
 
+    @Volatile
     private var editorBoundaryGeneration = 0L
+
+    private var visibleClipboardUpdate: ClipboardSuggestionState.Update<DatabaseBean>? = null
+    private var visibleClipboardBoundary = 0L
 
     private var isClipboardFresh: Boolean = false
     private var isInlineSuggestionPresent: Boolean = false
 
     @Keep
-    private val onClipboardUpdateListener = ClipboardHelper.OnClipboardUpdateListener { bean ->
-        if (!clipboardSuggestion || PrivacyModeState.active) {
-            service.lifecycleScope.launch { dismissClipboardSuggestion() }
-            return@OnClipboardUpdateListener
-        }
+    private val onClipboardUpdateListener = ClipboardHelper.OnClipboardUpdateListener { update ->
+        val boundary = editorBoundaryGeneration
         service.lifecycleScope.launch {
-            val text = bean?.text
-            if (PrivacyModeState.active || text.isNullOrEmpty()) {
-                isClipboardFresh = false
+            if (!ClipboardHelper.isCurrentSuggestion(update) || boundary != editorBoundaryGeneration) return@launch
+            val epoch = update.privacyEpoch
+            val text = update.bean?.text
+            if (!clipboardSuggestion || epoch == null || !PrivacyModeState.isOrdinaryEpoch(epoch) || text.isNullOrEmpty()) {
+                dismissClipboardSuggestion()
             } else {
+                visibleClipboardUpdate = update
+                visibleClipboardBoundary = boundary
                 alwaysUi.clipboardUi.text.text = text.take(42)
                 isClipboardFresh = true
                 launchClipboardTimeoutJob()
+                evalAlwaysUiState()
             }
-            evalAlwaysUiState()
         }
+    }
+
+    private fun currentVisibleClipboard(): DatabaseBean? {
+        val update = visibleClipboardUpdate ?: return null
+        val epoch = update.privacyEpoch ?: return null
+        if (visibleClipboardBoundary != editorBoundaryGeneration ||
+            !ClipboardHelper.isCurrentSuggestion(update) || !PrivacyModeState.isOrdinaryEpoch(epoch)
+        ) return null
+        return update.bean
     }
 
     private fun launchClipboardTimeoutJob() {
@@ -118,9 +134,8 @@ class InputBarDelegate(override val di: DI) :
         if (timeout < 0L) return
         clipboardTimeoutJob = service.lifecycleScope.launch {
             delay(timeout)
-            isClipboardFresh = false
             clipboardTimeoutJob = null
-            evalAlwaysUiState()
+            dismissClipboardSuggestion()
         }
     }
 
@@ -135,47 +150,54 @@ class InputBarDelegate(override val di: DI) :
         alwaysUi.updateState(newState)
     }
 
-    private val swipeDownHideKeyboardCallback: ((KeyBehavior) -> Unit) = { d ->
-        if (d == KeyBehavior.SWIPE_DOWN) {
+    private fun swipeDownHideKeyboardCallback(expected: QuickBarStateMachine.State): (KeyBehavior) -> Unit = { d ->
+        if (d == KeyBehavior.SWIPE_DOWN && barStateMachine.currentState == expected) {
             service.requestHideSelf(0)
         }
     }
 
     private val alwaysUi: AlwaysUi by lazy {
         AlwaysUi(context, scope, { keyboardWindow.currentKeyboard }) { action ->
+            // A touch started on the toolbar can finish after candidates replace it.
+            if (barStateMachine.currentState != QuickBarStateMachine.State.Always) return@AlwaysUi
             if (action.isNotEmpty()) {
                 commonKeyboardActionListener.listener.onAction(theme.resolveAction(action))
-            } else {
+            } else if (!service.isClipboardSearchEditing) {
                 windowManager.attachWindow(SwitchOptionWindow(di))
             }
         }.apply {
             hideKeyboardButton.apply {
-                setOnClickListener { service.requestHideSelf(0) }
-                onSwipe = swipeDownHideKeyboardCallback
+                setOnClickListener {
+                    if (barStateMachine.currentState == QuickBarStateMachine.State.Always) service.requestHideSelf(0)
+                }
+                onSwipe = swipeDownHideKeyboardCallback(QuickBarStateMachine.State.Always)
             }
             clipboardUi.suggestionView.apply {
                 setOnClickListener {
-                    if (PrivacyModeState.active) {
-                        dismissClipboardSuggestion()
+                    if (barStateMachine.currentState != QuickBarStateMachine.State.Always || currentState != AlwaysUi.State.Clipboard) {
                         return@setOnClickListener
                     }
-                    val content = ClipboardHelper.lastBean?.text
+                    val content = currentVisibleClipboard()?.text
                     content?.let { service.commitText(it) }
                     dismissClipboardSuggestion()
                 }
                 setOnLongClickListener {
-                    if (PrivacyModeState.active) {
-                        dismissClipboardSuggestion()
+                    if (barStateMachine.currentState != QuickBarStateMachine.State.Always || currentState != AlwaysUi.State.Clipboard) {
                         return@setOnLongClickListener true
                     }
-                    ClipboardHelper.lastBean?.let {
-                        AppUtils.launchClipEdit(context, it.id, ClipEditActivity.FROM_CLIPBOARD)
+                    val bean = currentVisibleClipboard()
+                    if (bean == null) {
+                        dismissClipboardSuggestion()
+                    } else {
+                        AppUtils.launchClipEdit(context, bean.id, ClipEditActivity.FROM_CLIPBOARD)
                     }
                     true
                 }
             }
             clipboardUi.dismiss.setOnClickListener {
-                dismissClipboardSuggestion()
+                if (barStateMachine.currentState == QuickBarStateMachine.State.Always && currentState == AlwaysUi.State.Clipboard) {
+                    dismissClipboardSuggestion()
+                }
             }
         }
     }
@@ -183,6 +205,7 @@ class InputBarDelegate(override val di: DI) :
     private fun dismissClipboardSuggestion() {
         clipboardTimeoutJob?.cancel()
         clipboardTimeoutJob = null
+        visibleClipboardUpdate = null
         isClipboardFresh = false
         alwaysUi.clipboardUi.text.text = ""
         evalAlwaysUiState()
@@ -193,6 +216,7 @@ class InputBarDelegate(override val di: DI) :
         editorBoundaryGeneration++
         clipboardTimeoutJob?.cancel()
         clipboardTimeoutJob = null
+        visibleClipboardUpdate = null
         inlineSuggestionJob?.cancel()
         inlineSuggestionJob = null
         isClipboardFresh = false
@@ -207,7 +231,7 @@ class InputBarDelegate(override val di: DI) :
     private val candidateUi by lazy {
         CandidateUi(context, scope, candidate.view).apply {
             unrollButton.apply {
-                onSwipe = swipeDownHideKeyboardCallback
+                onSwipe = swipeDownHideKeyboardCallback(QuickBarStateMachine.State.Candidate)
             }
         }
     }

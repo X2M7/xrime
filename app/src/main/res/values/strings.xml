@@ -13,7 +13,7 @@
     <string name="ime_enter">Enter</string>
     <string name="ime_existing_resources">Deployment failed. Using an available dictionary; retry from the deployment log.</string>
     <!-- Input Method Platform Tittle  -->
-    <string name="app_name_release">Trime</string>
+    <string name="app_name_release">xrime</string>
     <!-- Preference settings -->
     <string name="qq_group_1">Trime QQ group 1</string>
     <string name="qq_group_2">Trime QQ group 2</string>
@@ -23,6 +23,7 @@
     <string name="current_version">Current version</string>
     <string name="license">License</string>
     <string name="privacy_policy">Privacy Policy</string>
+    <string name="theme_command_failed">Unable to open this theme action.</string>
     <string name="build_info_format">Builder: %1$s\nBuild Git Hash: %2$s\nBuild Time: %3$s</string>
     <string name="selected_theme">Themes</string>
     <string name="selected_theme_summary">Select desired theme</string>
@@ -150,6 +151,22 @@
     <string name="cancel">Cancel</string>
     <string name="licenses_of_third_party_libraries">Licenses of third-party libraries</string>
     <string name="clipboard">Clipboard</string>
+    <string name="clipboard_images">Images</string>
+    <string name="clipboard_more_actions">Clipboard actions</string>
+    <string name="clipboard_text_editor">Text editing panel</string>
+    <string name="private_copy_action">Copy selection to local history</string>
+    <string name="private_copy_saved">Saved to local history; system clipboard unchanged.</string>
+    <string name="private_copy_unavailable">Cannot save this selection to clipboard history.</string>
+    <string name="private_copy_too_large">Selection is too long to save.</string>
+    <string name="clipboard_images_empty">No saved images</string>
+    <string name="clipboard_images_page_failed">Could not load images. Tap to retry.</string>
+    <string name="clipboard_images_unavailable">Images are unavailable. Return to this page to retry.</string>
+    <string name="clipboard_image_description">Image %1$d × %2$d. Tap to send; long press to manage.</string>
+    <string name="clipboard_image_target_unsupported">This editor cannot receive this image.</string>
+    <string name="clipboard_image_composition_pending">Finish the current composition before sending an image.</string>
+    <string name="clipboard_image_send_failed">Could not send the image. Try again.</string>
+    <string name="clipboard_image_load_failed">Image unavailable. Tap to retry.</string>
+    <string name="clipboard_image_action_failed">Could not update the image. Try again.</string>
     <string name="collection">Collection</string>
     <string name="simple_key_unpin">Unpin</string>
     <string name="simple_key_pin">Pin</string>
@@ -187,6 +204,7 @@
     <string name="no_theme_to_select">Currently there is no theme to select.</string>
     <string name="theme_unavailable_fallback">Theme “%1$s” is unavailable, switched to “%2$s”.</string>
     <string name="no_color_to_select">Currently there is no color scheme to select.</string>
+    <string name="color_scheme_unavailable">Unable to load or apply the color scheme. Please try again.</string>
     <string name="no_effect_to_select">Currently there is no key sound effect to select.</string>
     <string name="setup_channel">Setup Wizard</string>
     <string name="forget_this_word">Forget this word</string>
@@ -304,4 +322,19 @@
     <string name="t9_source_missing">Missing</string>
     <string name="t9_source_repeat">Repeated</string>
     <string name="t9_suggestion_source">%1$s (%2$s)</string>
+
+    <string name="clipboard_search">Search clipboard</string>
+    <string name="clipboard_search_hint">Search clipboard history</string>
+    <string name="clipboard_search_results">Results</string>
+    <string name="clipboard_search_cancel">Cancel</string>
+    <string name="clipboard_search_no_results">No matching clipboard entries</string>
+    <string name="clipboard_search_finish_composition">Finish the current composition first</string>
+    <string name="clipboard_search_unavailable">Clipboard search is unavailable</string>
+    <string name="clipboard_search_clear">Show all clipboard entries</string>
+    <string name="clipboard_repeat_selection">Repeat the selected clipboard item with intercepted Ctrl+V</string>
+    <string name="clipboard_repeat_selection_summary">Requires Ctrl+V interception. Finish composing before pasting; unavailable or sensitive items are not used.</string>
+    <string name="clipboard_meta_v">Open clipboard history with Meta+V</string>
+    <string name="clipboard_meta_v_summary">Available when the system delivers this shortcut to the input method.</string>
+    <string name="clipboard_repeat_unavailable">Finish composing or select an available clipboard item.</string>
+    <string name="sound_effect_unavailable">The custom key sound could not be loaded. Check its format, place it inside the sound folder, and keep each file at most 16 MiB. The system key sound will be tried.</string>
 </resources>

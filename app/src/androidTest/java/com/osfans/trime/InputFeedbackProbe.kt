@@ -7,6 +7,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioManager
 import android.media.AudioTrack
+import android.media.SoundPool
 import android.os.Build
 import android.os.Bundle
 import android.os.ParcelFileDescriptor
@@ -21,6 +22,8 @@ import com.osfans.trime.daemon.RimeDaemon
 import com.osfans.trime.data.prefs.AppPrefs
 import com.osfans.trime.data.soundeffect.SoundEffectManager
 import com.osfans.trime.ime.keyboard.InputFeedbackManager
+import com.osfans.trime.ime.keyboard.FeedbackResource
+import com.osfans.trime.ime.keyboard.customSoundGain
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
@@ -35,10 +38,27 @@ import kotlin.math.roundToInt
 import kotlin.math.sin
 
 internal object InputFeedbackProbe {
-    private fun field(name: String): Any? = InputFeedbackManager::class.java.getDeclaredField(name).let {
+    private fun member(owner: Any, name: String): Any? = owner.javaClass.getDeclaredField(name).let {
         it.isAccessible = true
-        it.get(InputFeedbackManager)
+        it.get(owner)
     }
+
+    private fun playback(): Any {
+        val delegate = member(InputFeedbackManager, "soundPlayback\$delegate") as Lazy<*>
+        return checkNotNull(delegate.value)
+    }
+
+    private fun coordinator(): Any = checkNotNull(member(playback(), "coordinator"))
+
+    private fun field(name: String): Any? = when (name) {
+        "tts" -> (member(InputFeedbackManager, "speech") as FeedbackResource<*>).current
+        "soundPool" -> member(coordinator(), "currentPool")
+        "loadedSounds" -> member(coordinator(), "cache")
+        "readySounds" -> (member(coordinator(), "cache") as Map<*, *>).values.toSet()
+        else -> member(InputFeedbackManager, name)
+    }
+
+    private fun soundIsIdle(): Boolean = member(coordinator(), "op") == null && member(coordinator(), "pendingRelease") == null
 
     private data class SoundDescriptorIdentity(val device: Long, val inode: Long)
 
@@ -293,7 +313,7 @@ internal object InputFeedbackProbe {
         }
     }
 
-    fun run(instrumentation: Instrumentation) {
+    fun run(instrumentation: Instrumentation, audioOnly: Boolean = false) {
         var success = false
         val result = Bundle()
         val descriptorAudit = mutableListOf<String>()
@@ -311,6 +331,7 @@ internal object InputFeedbackProbe {
             val folder = File(root, id)
             check(folder.mkdirs())
             val descriptors = listOf(File(root, "$id-long.sound.yaml"), File(root, "$id-short.sound.yaml"))
+            val missingDescriptor = File(root, "$id-missing.sound.yaml")
             try {
                 // This fixture tests lifecycle/FD ownership, not resampling.
                 // SoundPool requests FAST for shared PCM on API21; matching its
@@ -328,7 +349,8 @@ internal object InputFeedbackProbe {
                     .putInt(16).putShort(1).putShort(1).putInt(sampleRate).putInt(sampleRate * 2)
                     .putShort(2).putShort(16).put("data".toByteArray()).putInt(dataBytes)
                 repeat(frameCount) { audio.putShort((sin(it * 2.0 * Math.PI * 240 / sampleRate) * 3000).toInt().toShort()) }
-                File(folder, "key.wav").writeBytes(audio.array())
+                val audioFile = File(folder, "key.wav")
+                audioFile.writeBytes(audio.array())
                 descriptors.forEachIndexed { index, file ->
                     check(!file.exists())
                     val name = "$id-${if (index == 0) "long" else "short"}"
@@ -372,71 +394,127 @@ internal object InputFeedbackProbe {
                                 prefs.speakOnCommit.setValue(false)
                             }
                         }
-                        val soundFixtures = descriptors.associateWith(::descriptorIdentity)
-                        val soundIdentities = soundFixtures.values.toSet()
-                        check(soundIdentities.size == 2) { "Expected two distinct sound descriptor fixture identities" }
-                        var descriptorContext = DescriptorAuditContext(
-                            soundIdentities,
-                            calibrateDescriptorMetadata(soundFixtures, descriptorAudit),
-                            descriptorAudit,
-                            result,
-                        )
-                        verifySoundDescriptorHandles(descriptorContext, "before-controls", 0)
-                        // Open the SAME fixture twice. Counting only distinct inodes
-                        // would incorrectly report one handle in the two-slot control.
-                        descriptors.first().inputStream().use {
-                            verifySoundDescriptorHandles(descriptorContext, "held-one", 1)
+                        var audioDescriptorContext: DescriptorAuditContext? = null
+                        if (!audioOnly) {
+                            val soundFixtures = (descriptors + audioFile).associateWith(::descriptorIdentity)
+                            val soundIdentities = soundFixtures.values.toSet()
+                            check(soundIdentities.size == 3) { "Expected distinct descriptor and audio fixture identities" }
+                            var descriptorContext = DescriptorAuditContext(
+                                soundIdentities,
+                                calibrateDescriptorMetadata(soundFixtures, descriptorAudit),
+                                descriptorAudit,
+                                result,
+                            )
+                            verifySoundDescriptorHandles(descriptorContext, "before-controls", 0)
+                            // Open the SAME fixture twice. Counting only distinct inodes
+                            // would incorrectly report one handle in the two-slot control.
                             descriptors.first().inputStream().use {
-                                verifySoundDescriptorHandles(descriptorContext, "held-two-same-file", 2)
+                                verifySoundDescriptorHandles(descriptorContext, "held-one", 1)
+                                descriptors.first().inputStream().use {
+                                    verifySoundDescriptorHandles(descriptorContext, "held-two-same-file", 2)
+                                }
+                                verifySoundDescriptorHandles(descriptorContext, "held-one-after-inner-close", 1)
                             }
-                            verifySoundDescriptorHandles(descriptorContext, "held-one-after-inner-close", 1)
+                            verifySoundDescriptorHandles(descriptorContext, "after-target-controls", 0)
+                            val unrelated = File(folder, "unrelated-fd-control.bin")
+                            unrelated.writeBytes(byteArrayOf(1))
+                            val unrelatedIdentity = descriptorIdentity(unrelated)
+                            check(unrelatedIdentity !in soundIdentities)
+                            descriptorContext = descriptorContext.copy(
+                                metadataCalibration = calibrateDescriptorMetadata(soundFixtures + (unrelated to unrelatedIdentity), descriptorAudit),
+                            )
+                            val unrelatedBefore = descriptorSnapshot(descriptorContext, "before-unrelated-control")
+                            withOpenReaders(unrelated, 9) {
+                                val held = verifySoundDescriptorHandles(descriptorContext, "held-nine-unrelated", 0)
+                                val unrelatedSlots = held.ownedBy(setOf(unrelatedIdentity))
+                                check(unrelatedSlots.size == 9) { "Unrelated open-slot control missing handles: $unrelatedSlots" }
+                                // Remove only the verified nine-slot cohort from THIS
+                                // snapshot. Do not assume other process FDs stayed fixed.
+                                val withoutUnrelated = held.listedCount - unrelatedSlots.size
+                                check(held.listedCount > withoutUnrelated + 8)
+                                descriptorAudit += "unrelated-control actual_before=${unrelatedBefore.listedCount} " +
+                                    "actual_held=${held.listedCount} unrelated_slots=$unrelatedSlots " +
+                                    "same_snapshot_old_global_before=$withoutUnrelated " +
+                                    "same_snapshot_old_global_after=${held.listedCount} old_plus8_rejected=true"
+                            }
+                            val afterUnrelated = verifySoundDescriptorHandles(descriptorContext, "after-unrelated-close", 0)
+                            check(afterUnrelated.ownedBy(setOf(unrelatedIdentity)).isEmpty())
+                            check(unrelated.delete())
+                            val beforeScans = verifySoundDescriptorHandles(descriptorContext, "before-scans", 0, true)
+                            result.putInt("sound_descriptor_process_fds_before", beforeScans.listedCount)
+                            repeat(10) { batch ->
+                                repeat(20) { SoundEffectManager.getAllSoundEffects() }
+                                verifySoundDescriptorHandles(descriptorContext, "after-scan-batch-${batch + 1}", 0)
+                            }
+                            val afterScans = verifySoundDescriptorHandles(descriptorContext, "after-200-scans", 0, true)
+                            result.putInt("sound_descriptor_process_fds_after", afterScans.listedCount)
+                            descriptorAudit += "scan_process_fd_delta=${afterScans.listedCount - beforeScans.listedCount} diagnostic_only=true"
+                            audioDescriptorContext = descriptorContext
+                        } else {
+                            repeat(200) { SoundEffectManager.getAllSoundEffects() }
+                            result.putBoolean("sound_descriptor_audit_run", false)
                         }
-                        verifySoundDescriptorHandles(descriptorContext, "after-target-controls", 0)
-                        val unrelated = File(folder, "unrelated-fd-control.bin")
-                        unrelated.writeBytes(byteArrayOf(1))
-                        val unrelatedIdentity = descriptorIdentity(unrelated)
-                        check(unrelatedIdentity !in soundIdentities)
-                        descriptorContext = descriptorContext.copy(
-                            metadataCalibration = calibrateDescriptorMetadata(soundFixtures + (unrelated to unrelatedIdentity), descriptorAudit),
-                        )
-                        val unrelatedBefore = descriptorSnapshot(descriptorContext, "before-unrelated-control")
-                        withOpenReaders(unrelated, 9) {
-                            val held = verifySoundDescriptorHandles(descriptorContext, "held-nine-unrelated", 0)
-                            val unrelatedSlots = held.ownedBy(setOf(unrelatedIdentity))
-                            check(unrelatedSlots.size == 9) { "Unrelated open-slot control missing handles: $unrelatedSlots" }
-                            // Remove only the verified nine-slot cohort from THIS
-                            // snapshot. Do not assume other process FDs stayed fixed.
-                            val withoutUnrelated = held.listedCount - unrelatedSlots.size
-                            check(held.listedCount > withoutUnrelated + 8)
-                            descriptorAudit += "unrelated-control actual_before=${unrelatedBefore.listedCount} " +
-                                "actual_held=${held.listedCount} unrelated_slots=$unrelatedSlots " +
-                                "same_snapshot_old_global_before=$withoutUnrelated " +
-                                "same_snapshot_old_global_after=${held.listedCount} old_plus8_rejected=true"
+                        // Exercise the actual manager's ordinary system-sound branch. The API
+                        // is void, so these assertions establish accepted manager state and
+                        // completion only; they do not claim physical output was audible.
+                        withContext(Dispatchers.Main) {
+                            prefs.soundOnKeyPress.setValue(true)
+                            prefs.useCustomSoundEffect.setValue(false)
+                            prefs.soundVolume.setValue(0)
                         }
-                        val afterUnrelated = verifySoundDescriptorHandles(descriptorContext, "after-unrelated-close", 0)
-                        check(afterUnrelated.ownedBy(setOf(unrelatedIdentity)).isEmpty())
-                        check(unrelated.delete())
-                        val beforeScans = verifySoundDescriptorHandles(descriptorContext, "before-scans", 0, true)
-                        result.putInt("sound_descriptor_process_fds_before", beforeScans.listedCount)
-                        repeat(10) { batch ->
-                            repeat(20) { SoundEffectManager.getAllSoundEffects() }
-                            verifySoundDescriptorHandles(descriptorContext, "after-scan-batch-${batch + 1}", 0)
+                        while (!withContext(Dispatchers.Main) {
+                            member(playback(), "appliedRevision") == member(coordinator(), "gateRevision") &&
+                                member(coordinator(), "gateEnabled") == true && soundIsIdle()
+                        }) delay(50)
+                        withContext(Dispatchers.Main) {
+                            InputFeedbackManager.keyPressSound(KeyEvent.KEYCODE_SPACE)
+                            InputFeedbackManager.keyPressSound(KeyEvent.KEYCODE_DEL)
+                            InputFeedbackManager.keyPressSound(KeyEvent.KEYCODE_ENTER)
                         }
-                        val afterScans = verifySoundDescriptorHandles(descriptorContext, "after-200-scans", 0, true)
-                        result.putInt("sound_descriptor_process_fds_after", afterScans.listedCount)
-                        descriptorAudit += "scan_process_fd_delta=${afterScans.listedCount - beforeScans.listedCount} diagnostic_only=true"
+                        while (!withContext(Dispatchers.Main) { soundIsIdle() }) delay(50)
+                        withContext(Dispatchers.Main) { prefs.soundVolume.setValue(37) }
+                        while (!withContext(Dispatchers.Main) {
+                            member(playback(), "appliedRevision") == member(coordinator(), "gateRevision") && soundIsIdle()
+                        }) delay(50)
+                        withContext(Dispatchers.Main) { InputFeedbackManager.keyPressSound(KeyEvent.KEYCODE_A) }
+                        while (!withContext(Dispatchers.Main) { soundIsIdle() }) delay(50)
+                        withContext(Dispatchers.Main) {
+                            prefs.soundOnKeyPress.setValue(false)
+                            InputFeedbackManager.keyPressSound(KeyEvent.KEYCODE_A)
+                        }
+                        while (!withContext(Dispatchers.Main) {
+                            member(playback(), "appliedRevision") == member(coordinator(), "gateRevision") && soundIsIdle()
+                        }) delay(50)
+                        check(withContext(Dispatchers.Main) {
+                            member(coordinator(), "gateEnabled") == false && member(coordinator(), "warned") == false
+                        })
+                        result.putBoolean("system_sound_default_explicit_disabled_exercised", true)
                         val effects = SoundEffectManager.getAllSoundEffects().filter { it.name.startsWith(id) }.sortedBy { it.melody.size }
                         check(effects.size == 2)
-                        verifySoundDescriptorHandles(descriptorContext, "after-effects-read", 0)
+                        audioDescriptorContext?.let { verifySoundDescriptorHandles(it, "after-effects-read", 0) }
                         withContext(Dispatchers.Main) {
                             prefs.soundOnKeyPress.setValue(true)
                             prefs.useCustomSoundEffect.setValue(true)
-                            prefs.soundVolume.setValue(10)
+                            // The settings UI reserves zero for system-controlled volume.
+                            prefs.soundVolume.setValue(0)
                             SoundEffectManager.switchEffect(effects.last())
                         }
                         while (!withContext(Dispatchers.Main) { (field("readySounds") as Set<*>).isNotEmpty() }) delay(50)
+                        // Only inspect the production pool while its owner has no queued work;
+                        // the real native play/stop calls run on a worker, never on the UI thread.
+                        while (!withContext(Dispatchers.Main) { soundIsIdle() }) delay(50)
+                        val (pool, soundId) = withContext(Dispatchers.Main) {
+                            (field("soundPool") as SoundPool) to ((field("readySounds") as Set<*>).first() as Int)
+                        }
+                        withContext(Dispatchers.IO) {
+                            val streamId = pool.play(soundId, customSoundGain(0), customSoundGain(0), 0, 0, 1f)
+                            check(streamId != 0) { "SoundPool did not accept the system-volume playback request" }
+                            pool.stop(streamId)
+                        }
+                        result.putBoolean("sound_zero_volume_loaded_and_play_request_accepted", true)
                         withContext(Dispatchers.Main) {
                             repeat(4) { InputFeedbackManager.keyPressSound(KeyEvent.KEYCODE_A) }
+                            prefs.soundVolume.setValue(10)
                             SoundEffectManager.switchEffect(effects.first())
                             // Press before the asynchronous reload can reset the old melody index.
                             InputFeedbackManager.keyPressSound(KeyEvent.KEYCODE_A)
@@ -446,8 +524,23 @@ internal object InputFeedbackProbe {
                             withContext(Dispatchers.Main) { InputFeedbackManager.keyPressSound(KeyEvent.KEYCODE_A) }
                             delay(30)
                         }
+                        audioDescriptorContext?.let { verifySoundDescriptorHandles(it, "after-audio-load-and-play", 0) }
+                        missingDescriptor.writeText("name: $id-missing\nfolder: $id\nsound: [absent.wav]\nmelody: [absent.wav]\nkeyset: []\n")
+                        val missingEffect = SoundEffectManager.getAllSoundEffects().single { it.name == "$id-missing" }
+                        withContext(Dispatchers.Main) { SoundEffectManager.switchEffect(missingEffect) }
+                        while (!withContext(Dispatchers.Main) {
+                            SoundEffectManager.activeSoundEffect?.name == missingEffect.name &&
+                                member(playback(), "installedEffect") != null && soundIsIdle() &&
+                                (member(coordinator(), "retry") as Map<*, *>).containsKey("absent.wav")
+                        }) delay(50)
                         withContext(Dispatchers.Main) {
-                            check(SoundEffectManager.activeSoundEffect?.name == effects.first().name)
+                            check((field("loadedSounds") as Map<*, *>).isEmpty())
+                            check((field("readySounds") as Set<*>).isEmpty())
+                            InputFeedbackManager.keyPressSound(KeyEvent.KEYCODE_A)
+                            result.putBoolean("sound_missing_file_rejected", true)
+                        }
+                        withContext(Dispatchers.Main) {
+                            check(SoundEffectManager.activeSoundEffect?.name == missingEffect.name)
                             check(field("tts") == null)
                             InputFeedbackManager.destroy()
                             check(field("tts") == null && field("soundPool") == null)
@@ -455,7 +548,7 @@ internal object InputFeedbackProbe {
                             check((field("readySounds") as Set<*>).isEmpty())
                             InputFeedbackManager.reloadSoundEffects()
                             InputFeedbackManager.startInput()
-                            check(field("soundLoading") == null && field("soundPool") == null)
+                            check(field("soundPool") == null)
                         }
                     }
                 }
@@ -467,12 +560,17 @@ internal object InputFeedbackProbe {
                     prefs.soundVolume.setValue(previousVolume)
                 }
                 descriptors.forEach { if (it.exists()) check(it.delete()) }
+                if (missingDescriptor.exists()) check(missingDescriptor.delete())
                 check(folder.deleteRecursively())
                 SoundEffectManager.init()
                 check(prefs.customSoundEffect.sharedPreferences.edit().commit())
             }
             success = true
-            result.putString("stream", "PASS: lazy feedback, 200 descriptor scans, actual SoundPool loading, shorter melody switch, playback and resource release\n")
+            result.putString("stream", if (audioOnly) {
+                "PASS: audio-only feedback, SoundPool loading, missing file, playback request and resource release; FD audit not run\n"
+            } else {
+                "PASS: lazy feedback, 200 descriptor scans, actual SoundPool loading, shorter melody switch, playback and resource release\n"
+            })
         } catch (e: Throwable) {
             result.putString("stream", "FAIL: ${e.stackTraceToString()}\n")
         }

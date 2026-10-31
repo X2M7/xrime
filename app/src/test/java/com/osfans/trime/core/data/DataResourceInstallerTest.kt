@@ -71,6 +71,12 @@ class DataResourceInstallerTest :
             probed shouldBe listOf("shared/missing.yaml")
         }
 
+        "old descriptors can contain assets outside the shared directory" {
+            val old = DataChecksums("old", mapOf("shared" to "", "privacy.md" to "old", "shared/removed.yaml" to "old"))
+            val new = DataChecksums("new", emptyMap())
+            DataDiff.diff(old, new) { false } shouldBe listOf(DataDiff.DeleteFile("shared/removed.yaml"))
+        }
+
         "nested removal preserves the top-level namesake and user data" {
             val root = createTempDirectory().toFile()
             try {

@@ -44,8 +44,10 @@ internal object SafDirectoryListing {
         val result = mutableListOf<Row>()
         val ids = excludedDocumentIds.toMutableSet()
         val names = mutableSetOf<String>()
+        val budget = SafListingBudget()
         while (rows.moveToNext()) {
             val row = rows.current()
+            budget.accept(row.documentId, row.name, row.mimeType)
             require(!row.documentId.isNullOrEmpty()) { "External entry has no document ID" }
             SyncRelativePath.requireSafeName(row.name)
             require(!row.mimeType.isNullOrEmpty()) { "External entry has no MIME type: ${row.documentId}" }
@@ -70,6 +72,9 @@ internal object SafDirectoryListing {
         require(rootId.isNotEmpty()) { "External tree has no root document ID" }
         val directoryId = if (segments.size == 2) rootId else DocumentsContract.getDocumentId(dirUri)
         require(directoryId.isNotEmpty()) { "External directory has no document ID" }
+        require(rootId.length <= SafListingBudget.MAX_ID_CHARS && directoryId.length <= SafListingBudget.MAX_ID_CHARS) {
+            "External directory has an oversized document ID"
+        }
         val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(dirUri, directoryId)
         val cursor = resolver.query(childrenUri, PROJECTION, null, null, null)
             ?: throw IOException("Document provider returned no listing for $childrenUri")

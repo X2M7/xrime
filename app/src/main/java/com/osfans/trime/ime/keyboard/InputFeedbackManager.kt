@@ -8,31 +8,27 @@ package com.osfans.trime.ime.keyboard
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.media.AudioAttributes
-import android.media.AudioManager
-import android.media.SoundPool
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.os.VibrationEffect
 import android.speech.tts.TextToSpeech
-import android.util.SparseIntArray
 import android.view.HapticFeedbackConstants
 import android.view.KeyEvent
 import android.view.View
-import androidx.core.util.containsValue
+import android.widget.Toast
+import androidx.annotation.MainThread
+import com.osfans.trime.R
 import com.osfans.trime.TrimeApplication
 import com.osfans.trime.data.prefs.AppPrefs
-import com.osfans.trime.data.soundeffect.SoundEffectManager
 import com.osfans.trime.ime.core.PrivacyModeState
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import splitties.systemservices.audioManager
 import splitties.systemservices.vibrator
 import timber.log.Timber
-import java.util.concurrent.ConcurrentHashMap
+
+/** 0 is the settings UI's system-default choice; Android still controls the output stream. */
+internal fun customSoundGain(volume: Int): Float = if (volume == 0) 1f else volume.coerceIn(0, 100) / 100f
 
 /**
  * Manage the key press effects, such as vibration, sound, speaking and so on.
@@ -40,68 +36,87 @@ import java.util.concurrent.ConcurrentHashMap
 object InputFeedbackManager {
     private val keyboardPrefs = AppPrefs.defaultInstance().keyboard
 
-    private var tts: TextToSpeech? = null
-    private var soundPool: SoundPool? = null
+    private var applicationContext: Context? = null
+    private val callbackHandler by lazy { Handler(Looper.getMainLooper()) }
+    private val speechRequests = FeedbackRequestDispatcher(
+        isOwnerThread = { Looper.myLooper() == Looper.getMainLooper() },
+        postToOwner = { request -> callbackHandler.post { request() } },
+    )
+    private val speech = FeedbackResource<TextToSpeech> { it.shutdown() }
+    private val soundPlayback by lazy {
+        BoundedSoundPlayback(
+            SoundPoolBackend(audioManager) {
+                applicationContext?.let { Toast.makeText(it, R.string.sound_effect_unavailable, Toast.LENGTH_LONG).show() }
+            },
+            onEffectInstalled = { effectPlayProgress = 0 },
+        )
+    }
+    private data class PendingSpeech(val text: String, val onCommit: Boolean)
+    private var pendingSpeech: PendingSpeech? = null
+    private var speechAllowed = false
+    private var speechRetryAfter = 0L
 
     private var effectPlayProgress = 0
-    private val cachedSoundIds = SparseIntArray()
 
-    private val loadedSounds = ConcurrentHashMap<String, Int>()
-    private var effectPaths: List<String>? = null
-    private var initialized = false
-    private var soundLoading: Job? = null
-    private var speechReady = false
-    private var speechAllowed = false
-    private var pendingSpeech: String? = null
-    private var generation = 0
-    private var speechRetryAfter = 0L
-    private val readySounds = mutableSetOf<Int>()
-
-    fun init() {
-        initialized = true
+    @MainThread
+    fun init(context: Context = TrimeApplication.getInstance()) {
+        resetSpeechRequests()
+        applicationContext = context.applicationContext
+        speech.init()
+        soundPlayback.init()
     }
 
-    @Suppress("DEPRECATION")
-    private fun hasSpeechEngine(context: Context): Boolean = context.packageManager
-        .queryIntentServices(
-            Intent(TextToSpeech.Engine.INTENT_ACTION_TTS_SERVICE),
-            PackageManager.MATCH_DEFAULT_ONLY,
-        )
-        .orEmpty()
-        .isNotEmpty()
+    @MainThread
+    private fun resetSpeechRequests() {
+        speechRequests.invalidate()
+        pendingSpeech = null
+        speech.ready?.stop()
+    }
 
-    private fun prepareSpeech(text: String) {
-        pendingSpeech = text
-        if (tts != null) return
-        if (SystemClock.uptimeMillis() < speechRetryAfter) {
+    @MainThread
+    private fun prepareSpeech(onCommit: Boolean) {
+        val context = applicationContext ?: return
+        if (!speechAllowed || PrivacyModeState.active || SystemClock.uptimeMillis() < speechRetryAfter) {
             pendingSpeech = null
             return
         }
-        if (!initialized) return
-        val context = TrimeApplication.getInstance()
-        if (!hasSpeechEngine(context)) {
-            pendingSpeech = null
-            speechRetryAfter = SystemClock.uptimeMillis() + 30_000
-            Timber.i("Speech feedback engine unavailable; retry delayed")
-            return
+        if (!speech.canAcquire) {
+            speech.destroy()
+            speech.init()
         }
-        val currentGeneration = generation
+        if (speech.current == null) {
+            @Suppress("DEPRECATION")
+            val available = context.packageManager.queryIntentServices(
+                Intent(TextToSpeech.Engine.INTENT_ACTION_TTS_SERVICE),
+                PackageManager.MATCH_DEFAULT_ONLY,
+            ).isNotEmpty()
+            if (!available) {
+                speechRetryAfter = SystemClock.uptimeMillis() + 30_000
+                pendingSpeech = null
+                return
+            }
+        }
         try {
-            tts = TextToSpeech(context) { status ->
-                TrimeApplication.getInstance().coroutineScope.launch {
-                    if (currentGeneration != generation) return@launch
-                    speechReady = status == TextToSpeech.SUCCESS
-                    if (!speechReady) {
-                        tts?.shutdown()
-                        tts = null
+            val resource = speech.acquire(
+                enabled = if (onCommit) speakOnCommit else speakOnKeyPress,
+                create = { complete ->
+                    TextToSpeech(context) { status ->
+                        callbackHandler.post { complete(status == TextToSpeech.SUCCESS) }
+                    }
+                },
+                onInitialized = { engine, ready ->
+                    if (ready) {
+                        speakPending(engine)
+                    } else {
                         speechRetryAfter = SystemClock.uptimeMillis() + 30_000
-                        Timber.i("Speech feedback engine unavailable (status=%d); retry delayed", status)
+                        pendingSpeech = null
                     }
-                    if (speechReady && speechAllowed && !PrivacyModeState.active && (speakOnKeyPress || speakOnCommit)) {
-                        pendingSpeech?.let { tts?.speak(it, TextToSpeech.QUEUE_FLUSH, null, "TrimeTTS") }
-                    }
-                    pendingSpeech = null
-                }
+                },
+            )
+            if (resource == null) {
+                pendingSpeech = null
+            } else if (speech.ready === resource) {
+                speakPending(resource)
             }
         } catch (e: Exception) {
             speechRetryAfter = SystemClock.uptimeMillis() + 30_000
@@ -110,73 +125,25 @@ object InputFeedbackManager {
         }
     }
 
-    private fun prepareSoundPool() {
-        if (soundPool == null) {
-            soundPool =
-                SoundPool.Builder()
-                    .setMaxStreams(3)
-                    .setAudioAttributes(
-                        AudioAttributes.Builder()
-                            .setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
-                            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                            .build(),
-                    ).build().also { pool ->
-                        pool.setOnLoadCompleteListener { loadedPool, soundId, status ->
-                            if (loadedPool === soundPool && status == 0) readySounds.add(soundId)
-                        }
-                    }
-        }
-    }
-
-    private fun cacheSoundId() {
-        if (!initialized || !soundEffectEnabled || !soundOnKeyPress || soundLoading?.isActive == true) return
-        soundLoading = TrimeApplication.getInstance().coroutineScope.launch {
-            try {
-                val paths = withContext(Dispatchers.IO) {
-                    SoundEffectManager.init()
-                    SoundEffectManager.activeAudioPaths
-                }
-                if (!soundEffectEnabled || !soundOnKeyPress) return@launch
-                if (paths == effectPaths) return@launch
-                if (paths.isNotEmpty()) prepareSoundPool()
-
-                cachedSoundIds.clear()
-                loadedSounds.keys.filter { it !in paths }.forEach { path ->
-                    loadedSounds.remove(path)?.let {
-                        readySounds.remove(it)
-                        soundPool?.unload(it)
-                    }
-                }
-
-                paths.forEachIndexed { i, path ->
-                    val soundId = loadedSounds.getOrPut(path) { soundPool?.load(path, 1) ?: 0 }
-                    if (soundId != 0 && !cachedSoundIds.containsValue(soundId)) {
-                        cachedSoundIds.put(i, soundId)
-                    }
-                }
-
-                effectPaths = paths.toList()
-                effectPlayProgress = 0
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Timber.e(e, "Error loading key sound effects")
-            }
-        }
-    }
-
-    fun startInput(sensitive: Boolean = false) {
+    @MainThread
+    private fun speakPending(engine: TextToSpeech) {
+        val pending = pendingSpeech ?: return
         pendingSpeech = null
-        if (speechReady) tts?.stop()
-        speechAllowed = !sensitive
-        cacheSoundId()
+        if (speechAllowed && !PrivacyModeState.active && (if (pending.onCommit) speakOnCommit else speakOnKeyPress)) {
+            engine.speak(pending.text, TextToSpeech.QUEUE_FLUSH, null, "TrimeTTS")
+        }
     }
 
+    @MainThread
+    fun startInput(sensitive: Boolean = false) {
+        resetSpeechRequests()
+        speechAllowed = !sensitive
+        soundPlayback.startInput()
+    }
+
+    @MainThread
     fun reloadSoundEffects() {
-        soundLoading?.cancel()
-        soundLoading = null
-        effectPaths = null
-        cacheSoundId()
+        soundPlayback.reload()
     }
 
     private val hasAmplitudeControl =
@@ -222,7 +189,7 @@ object InputFeedbackManager {
     }
 
     private fun querySoundIndex(keyCode: Int): Int {
-        val effect = SoundEffectManager.activeSoundEffect ?: return 0
+        val effect = soundPlayback.installedEffect ?: return 0
         val sounds = effect.sound
         if (sounds.isEmpty()) return 0
         val melody = effect.melody
@@ -251,49 +218,32 @@ object InputFeedbackManager {
     /**
      * Makes a key press sound if the user has this feature enabled in the preferences.
      */
+    @MainThread
     fun keyPressSound(keyCode: Int = 0) {
         if (!soundOnKeyPress) return
-        if (soundEffectEnabled) {
-            if (soundVolume <= 0) return
-            val volume = soundVolume / 100f
-            val index = querySoundIndex(keyCode)
-            val soundId = cachedSoundIds[index]
-            if (soundId in readySounds) soundPool?.play(soundId, volume, volume, 0, 0, 1f)
-        } else {
-            val effect =
-                when (keyCode) {
-                    KeyEvent.KEYCODE_SPACE -> AudioManager.FX_KEYPRESS_SPACEBAR
-                    KeyEvent.KEYCODE_DEL -> AudioManager.FX_KEYPRESS_DELETE
-                    KeyEvent.KEYCODE_ENTER -> AudioManager.FX_KEYPRESS_RETURN
-                    else -> AudioManager.FX_KEYPRESS_STANDARD
-                }
-            val volume =
-                if (soundVolume == 0) {
-                    -1f
-                } else {
-                    soundVolume / 100f
-                }
-            audioManager.playSoundEffect(
-                effect,
-                volume,
-            )
-        }
+        val index = if (soundEffectEnabled && soundPlayback.installedEffect != null) querySoundIndex(keyCode) else -1
+        val systemVolume = if (soundVolume == 0) -1f else soundVolume.coerceIn(0, 100) / 100f
+        soundPlayback.press(index, customSoundGain(soundVolume), keyCode, systemVolume)
     }
 
     private val speakOnKeyPress by keyboardPrefs.speakOnKeyPress
     private val speakOnCommit by keyboardPrefs.speakOnCommit
 
     fun keyPressSpeak(keyCode: Int) {
-        if (!speakOnKeyPress || !speechAllowed || PrivacyModeState.active) return
-        contentSpeakInternal(keyCode)
+        speechRequests.dispatch {
+            if (speakOnKeyPress && speechAllowed && !PrivacyModeState.active) contentSpeakInternal(keyCode, onCommit = false)
+        }
     }
 
     fun textCommitSpeak(text: String) {
-        if (!speakOnCommit || !speechAllowed || PrivacyModeState.active) return
-        contentSpeakInternal(text)
+        speechRequests.dispatch {
+            if (speakOnCommit && speechAllowed && !PrivacyModeState.active) contentSpeakInternal(text, onCommit = true)
+        }
     }
 
-    private inline fun <reified T> contentSpeakInternal(content: T) {
+    @MainThread
+    private inline fun <reified T> contentSpeakInternal(content: T, onCommit: Boolean) {
+        if (applicationContext == null) return
         val text =
             when {
                 0 is T -> {
@@ -309,38 +259,25 @@ object InputFeedbackManager {
                 else -> return
             }
 
-        if (speechReady) {
-            tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "TrimeTTS")
-        } else {
-            prepareSpeech(text)
-        }
+        pendingSpeech = PendingSpeech(text, onCommit)
+        prepareSpeech(onCommit)
     }
 
+    @MainThread
     fun finishInput() {
         speechAllowed = false
-        pendingSpeech = null
-        if (speechReady) tts?.stop()
+        resetSpeechRequests()
         effectPlayProgress = 0
+        soundPlayback.finishInput()
     }
 
+    @MainThread
     fun destroy() {
-        if (speechReady) tts?.stop()
-        generation++
-        soundLoading?.cancel()
-        soundLoading = null
-        initialized = false
-        speechReady = false
         speechAllowed = false
+        resetSpeechRequests()
         speechRetryAfter = 0
-        pendingSpeech = null
-        tts?.shutdown()
-        tts = null
-        soundPool?.release()
-        soundPool = null
-
-        loadedSounds.clear()
-        readySounds.clear()
-        cachedSoundIds.clear()
-        effectPaths = null
+        applicationContext = null
+        speech.destroy()
+        soundPlayback.destroy()
     }
 }

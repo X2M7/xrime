@@ -191,6 +191,8 @@ internal object PrivacyTriggerSinkProbe {
         private val ordinaryCode = 'r'
         private val ordinaryCandidate = "ordinarylearning$suffix"
         private val ordinaryClipboard = "ordinaryclipboard$suffix"
+        private val resumedClipboard = "resumedclipboard$suffix"
+        private val timeoutClipboard = "timeoutclipboard$suffix"
         private val ordinarySymbol = "ordinarysymbol$suffix"
         private val logBoundary = UUID.randomUUID().toString().replace("-", "")
         private val logStart = "T07_REAL_TRIGGER_BEGIN_$logBoundary"
@@ -408,6 +410,8 @@ internal object PrivacyTriggerSinkProbe {
                 verifyPrivateCases()
                 verifyPrivateLogBoundary()
                 verifyOrdinaryRecovery()
+                verifyQueuedSuggestionAfterListeningToggle()
+                verifySuggestionTimeoutClearsText()
             } catch (failure: Throwable) {
                 primaryFailure = failure
                 throw failure
@@ -604,6 +608,51 @@ internal object PrivacyTriggerSinkProbe {
             )
         }
 
+        private suspend fun verifyQueuedSuggestionAfterListeningToggle() {
+            val stateField = ClipboardHelper::class.java.getDeclaredField("suggestionState").apply { isAccessible = true }
+            val state = stateField.get(ClipboardHelper)
+            val currentField = state.javaClass.getDeclaredField("current").apply { isAccessible = true }
+            val oldUpdate = currentField.get(state)
+            val notify = ClipboardHelper::class.java.declaredMethods.single { it.name == "notifySuggestionChanged" }
+                .apply { isAccessible = true }
+            val workerFailure = java.util.concurrent.atomic.AtomicReference<Throwable?>()
+            main {
+                check(harness.inputTextContains(clipboardUiProbe(ordinaryClipboard)))
+                // Keep the real UI thread occupied while the production listener posts the old
+                // notification, then invalidate it before the queued task can execute.
+                val worker = Thread {
+                    runCatching { notify.invoke(ClipboardHelper, oldUpdate) }
+                        .exceptionOrNull()?.let(workerFailure::set)
+                }
+                worker.start()
+                worker.join(5_000)
+                check(!worker.isAlive) { "Suggestion notification did not enqueue" }
+                workerFailure.get()?.let { throw it }
+                clipboardPrefs.clipboardListening.setValue(false)
+                clipboardPrefs.clipboardListening.setValue(true)
+            }
+            instrumentation.waitForIdleSync()
+            check(dao.find(ordinaryClipboard) != null) { "Disabling listening removed prior history" }
+            check(!main { harness.inputTextContains(clipboardUiProbe(ordinaryClipboard)) }) {
+                "An old queued suggestion reappeared after listening was disabled and enabled"
+            }
+            check(ClipboardHelper.lastBean == null) { "An old suggestion survived listener disable" }
+            setClipboard(resumedClipboard)
+            awaitClipboardSuggestion(resumedClipboard, "listener restart")
+            harness.phase("PASS: queued old suggestion is rejected after listening restarts; new capture works")
+        }
+
+        private suspend fun verifySuggestionTimeoutClearsText() {
+            main { clipboardPrefs.clipboardSuggestionTimeout.setValue(1) }
+            setClipboard(timeoutClipboard)
+            awaitClipboardSuggestion(timeoutClipboard, "timeout fixture")
+            awaitMain("clipboard timeout removes the hidden view's text") {
+                !harness.inputTextContains(clipboardUiProbe(timeoutClipboard))
+            }
+            check(dao.find(timeoutClipboard) != null) { "Suggestion timeout removed clipboard history" }
+            main { clipboardPrefs.clipboardSuggestionTimeout.setValue(100) }
+        }
+
         private suspend fun cleanup() {
             if (logStarted) {
                 runCatching { Log.i(LOG_TAG, logEnd) }
@@ -643,7 +692,7 @@ internal object PrivacyTriggerSinkProbe {
             }
             clean {
                 val ownedClipboard =
-                    cases.flatMap { listOf(it.clipboard, it.existingSuggestion) }.plus(ordinaryClipboard)
+                    cases.flatMap { listOf(it.clipboard, it.existingSuggestion) }.plus(listOf(ordinaryClipboard, resumedClipboard, timeoutClipboard))
                 withTimeout(15_000) {
                     var quietChecks = 0
                     while (quietChecks < 15) {

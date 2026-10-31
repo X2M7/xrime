@@ -47,7 +47,7 @@ internal object SensitiveClipboardCompat {
     ): Boolean {
         if (sdkInt < Build.VERSION_CODES.N) return false
         // Malformed unparcelled metadata must not turn a marked secret into clipboard history.
-        return runCatching { readBooleanExtra(EXTRA_IS_SENSITIVE) == true }.getOrDefault(true)
+        return ClipboardReadSafety.readOrNull { readBooleanExtra(EXTRA_IS_SENSITIVE) == true } ?: true
     }
 }
 

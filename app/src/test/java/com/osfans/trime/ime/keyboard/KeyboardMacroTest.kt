@@ -18,6 +18,18 @@ class KeyboardMacroTest :
             textOfAction = { texts[it].takeIf { _ -> it !in commits } },
         )
 
+        "pure input aliases expand before later navigation and literal commits" {
+            val text = mapOf("outer" to "{inner}", "inner" to "x", "fence" to "```\n\n```")
+            expandInputMacro("{outer}{End}{literal}", text::get) shouldBe listOf("{inner}", "{End}", "{literal}")
+            expandInputMacro("{fence}{End}{Up}{Up}", text::get) shouldBe listOf("{fence}", "{End}", "{Up}", "{Up}")
+        }
+
+        "pure input expansion rejects recursive and excessive macros before dispatch" {
+            shouldThrow<IllegalStateException> { expandInputMacro("{a}") { if (it == "a") "{a}" else null } }
+            shouldThrow<IllegalStateException> { expandInputMacro("{a}".repeat(4097)) { null } }
+            shouldThrow<IllegalStateException> { expandInputMacro("x".repeat(65537)) { null } }
+        }
+
         "ordinary text and macros without semantic mode actions keep the legacy dispatcher" {
             plan("ordinary text") shouldBe null
             plan("{Control+a}{BackSpace}") shouldBe null
@@ -54,6 +66,16 @@ class KeyboardMacroTest :
             keyboardMacroParts("") shouldBe emptyList()
             plan("{Keyboard_ascii}{unknown}{Control+a}{}", emptyMap()) shouldBe
                 listOf("{Keyboard_ascii}", "{unknown}", "{Control+a}", "{braceleft}", "{braceright}")
+        }
+
+        "multiline text retains commands escape prefixes literal braces and supplementary characters" {
+            keyboardMacroParts("a{End}\n{}\uD83D\uDE00{Left}\nZ") shouldBe
+                listOf("a", "{End}", "\n", "{braceleft}", "{braceright}", "\uD83D\uDE00", "{Left}", "\nZ")
+            keyboardMacroParts("{Escape}/fh{Control+a}\n{}\uD83D\uDE00") shouldBe
+                listOf("{Escape}/fh", "{Control+a}", "\n", "{braceleft}", "{braceright}", "\uD83D\uDE00")
+            keyboardMacroParts("{End}\r\ntext") shouldBe listOf("{End}", "\r\ntext")
+            plan("{Keyboard_ascii}\n{inner}", mapOf("inner" to "{Keyboard_native}")) shouldBe
+                listOf("{Keyboard_ascii}", "\n", "{Keyboard_native}")
         }
 
         "cyclic or excessive language aliases fail before partial acceptance" {

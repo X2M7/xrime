@@ -15,7 +15,37 @@ internal fun keyboardMacroParts(input: String): List<String> {
     return result
 }
 
-private val KEYBOARD_MACRO_PATTERN = """^((?:\{Escape\})?[^{}]+|\{[^{}]+\}).*$""".toRegex()
+private val KEYBOARD_MACRO_PATTERN = """^((?:\{Escape\})?[^{}]+|\{[^{}]+\}).*$""".toRegex(RegexOption.DOT_MATCHES_ALL)
+
+/** Flatten nested text aliases before accepting any pure input macro. */
+internal fun expandInputMacro(input: String, textOfAction: (String) -> String?): List<String> {
+    var visited = 0
+    var expandedCharacters = input.length
+    check(expandedCharacters <= 65536) { "Keyboard text macro exceeds 64 KiB" }
+    fun expand(value: String, ancestors: Set<String>): List<String> {
+        check(ancestors.size <= 8) { "Keyboard text macro exceeds eight alias levels" }
+        val result = mutableListOf<String>()
+        for (part in keyboardMacroParts(value)) {
+            check(++visited <= 4096) { "Keyboard text macro exceeds 4096 inspected parts" }
+            val braced = part.startsWith('{') && part.endsWith('}')
+            val token = if (braced) part.removeSurrounding("{", "}") else null
+            val nested = token?.let(textOfAction)
+            val containsActions = !nested.isNullOrEmpty() && keyboardMacroParts(nested).any {
+                it.length >= 3 && it.startsWith('{') && it.endsWith('}')
+            }
+            if (token != null && !nested.isNullOrEmpty() && containsActions) {
+                check(token !in ancestors) { "Cyclic keyboard text macro alias" }
+                expandedCharacters += nested.length
+                check(expandedCharacters <= 65536) { "Keyboard text macro alias expansion exceeds 64 KiB" }
+                result += expand(nested, ancestors + token)
+            } else {
+                result += part
+            }
+        }
+        return result
+    }
+    return expand(input, emptySet())
+}
 
 /**
  * Expand braced text aliases only when the complete macro contains a language action.

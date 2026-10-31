@@ -16,6 +16,7 @@ import com.android.build.gradle.tasks.PackageApplication
 import org.gradle.api.Project
 import org.gradle.api.artifacts.component.ModuleComponentIdentifier
 import org.gradle.api.artifacts.type.ArtifactTypeDefinition
+import org.gradle.api.attributes.Attribute
 import org.gradle.api.file.RegularFile
 import org.gradle.api.internal.provider.AbstractProperty
 import org.gradle.api.internal.provider.Providers
@@ -30,6 +31,25 @@ class AndroidAppConventionPlugin : AndroidBaseConventionPlugin() {
         target.pluginManager.apply("com.android.application")
 
         super.apply(target)
+
+        // Apply the exact reviewed parser backport to every resolved app JAR view,
+        // including JVM unit tests and the runtime used by Android packaging.
+        val yamlBackport = Attribute.of("com.osfans.trime.yaml-unicode-backport", String::class.java)
+        target.dependencies.apply {
+            attributesSchema.attribute(yamlBackport)
+            artifactTypes.maybeCreate(ArtifactTypeDefinition.JAR_TYPE).attributes.attribute(yamlBackport, "upstream")
+            registerTransform(YamlUnicodeBackportTransform::class.java) {
+                from.attribute(ArtifactTypeDefinition.ARTIFACT_TYPE_ATTRIBUTE, ArtifactTypeDefinition.JAR_TYPE)
+                from.attribute(yamlBackport, "upstream")
+                to.attribute(ArtifactTypeDefinition.ARTIFACT_TYPE_ATTRIBUTE, ArtifactTypeDefinition.JAR_TYPE)
+                to.attribute(yamlBackport, "backported")
+            }
+        }
+        target.configurations.configureEach {
+            // KSP's processor path consumes project class and resource directories,
+            // not the application runtime parser, and cannot select a JAR transform.
+            if (isCanBeResolved && !name.startsWith("ksp")) attributes.attribute(yamlBackport, "backported")
+        }
 
         // remove META-INF/com/android/build/gradle/app-metadata.properties
         target.tasks.withType<PackageApplication> {
@@ -56,7 +76,7 @@ class AndroidAppConventionPlugin : AndroidBaseConventionPlugin() {
                 val variantName = v.name.replaceFirstChar { it.uppercase() }
                 if (v.buildType == "debug") {
                     check(pluginVersion.version == OptimizedCoroutineServices.AGP_VERSION) {
-                        "Debug coroutine resource discovery requires reviewed AGP 9.4.1"
+                        "Debug coroutine resource discovery requires reviewed AGP ${OptimizedCoroutineServices.AGP_VERSION}"
                     }
                     check(!target.extensions.getByType<ApplicationExtension>().buildTypes.getByName("debug").isMinifyEnabled) {
                         "Debug coroutine relocation requires an unminified Debug variant"
@@ -82,7 +102,7 @@ class AndroidAppConventionPlugin : AndroidBaseConventionPlugin() {
                     // The generator must not consume the resource collection which contains its output.
                     checkNotNull(v.sources.resources).addGeneratedSourceDirectory(generate, GenerateDebugCoroutineResourcesTask::outputDirectory)
                     // Use the same pre-exclusion dependency resource type as AGP's app merger.
-                    // ScopedArtifact.JAVA_RES does not include all original app resources in AGP 9.4.1.
+                    // ScopedArtifact.JAVA_RES does not include all original app resources in the reviewed AGP.
                     val runtimeJavaResources = v.runtimeConfiguration.incoming.artifactView {
                         attributes.attribute(ArtifactTypeDefinition.ARTIFACT_TYPE_ATTRIBUTE, AndroidArtifacts.ArtifactType.JAVA_RES.type)
                     }.files
@@ -117,11 +137,11 @@ class AndroidAppConventionPlugin : AndroidBaseConventionPlugin() {
                     if (v.buildType == "release" &&
                         target.extensions.getByType<ApplicationExtension>().buildTypes.getByName("release").isMinifyEnabled
                     ) {
-                        // AGP 9.4.1 registers its R8 Java-resource transform after onVariants.
+                        // The reviewed AGP registers its R8 Java-resource transform after onVariants.
                         // Append here, after createAndroidTasks, so SPI input remains available to
                         // R8 and the DEX dependency cannot point back to this resource transform.
                         check(pluginVersion.version == OptimizedCoroutineServices.AGP_VERSION) {
-                            "The post-R8 resource transform requires reviewed AGP 9.4.1; found ${pluginVersion.version}"
+                            "The post-R8 resource transform requires reviewed AGP ${OptimizedCoroutineServices.AGP_VERSION}; found ${pluginVersion.version}"
                         }
                         check(tasks.findByName("minify${variantName}WithR8") != null) { "R8 producer is missing" }
                         val modules = setOf("kotlinx-coroutines-android", "kotlinx-coroutines-core-jvm")

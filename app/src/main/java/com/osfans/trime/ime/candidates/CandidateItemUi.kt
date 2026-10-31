@@ -110,6 +110,7 @@ class CandidateItemUi(
                         startToEndOf(text, ctx.dp(1))
                         endOfParent()
                         horizontalChainStyle = ConstraintLayout.LayoutParams.CHAIN_PACKED
+                        constrainedWidth = true
                     },
                 )
             }

@@ -9,6 +9,8 @@ import android.content.Context
 import android.content.res.ColorStateList
 import android.widget.ImageView
 import androidx.annotation.DrawableRes
+import androidx.constraintlayout.widget.ConstraintLayout
+import androidx.core.view.updateLayoutParams
 import com.osfans.trime.R
 import com.osfans.trime.core.CandidateSnapshot
 import com.osfans.trime.core.Candidates
@@ -71,6 +73,25 @@ class PaginationUi(
                 },
             )
         }
+
+    private var verticalLayout = false
+
+    /** Give vertical candidate pages larger, separated controls without changing horizontal pages. */
+    fun setVerticalLayout(vertical: Boolean) {
+        if (vertical == verticalLayout) return
+        verticalLayout = vertical
+        val size = ctx.dp(if (vertical) 56 else 48)
+        val padding = if (vertical) ctx.dp(12) else 0
+        for (icon in listOf(prevIcon, nextIcon)) {
+            icon.scaleType = if (vertical) ImageView.ScaleType.FIT_CENTER else ImageView.ScaleType.CENTER
+            icon.setPadding(padding, padding, padding, padding)
+            icon.updateLayoutParams<ConstraintLayout.LayoutParams> {
+                width = size
+                height = size
+            }
+        }
+        prevIcon.updateLayoutParams<ConstraintLayout.LayoutParams> { marginEnd = if (vertical) ctx.dp(8) else 0 }
+    }
 
     fun update(paged: Candidates.Paged, onPrev: () -> Unit, onNext: () -> Unit) {
         // Re-apply the tint as well: a scheme switch rebinds the pagination holder

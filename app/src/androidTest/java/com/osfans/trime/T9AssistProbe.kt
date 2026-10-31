@@ -22,8 +22,10 @@ import com.osfans.trime.core.T9StateProto
 import com.osfans.trime.data.prefs.AppPrefs
 import com.osfans.trime.data.theme.ThemeManager
 import com.osfans.trime.data.theme.model.KeyActionToken
+import com.osfans.trime.data.theme.model.TextKeyboard
 import com.osfans.trime.ime.core.InputView
 import com.osfans.trime.ime.core.TrimeInputMethodService
+import com.osfans.trime.ime.keyboard.Key
 import com.osfans.trime.ime.keyboard.KeyAction
 import com.osfans.trime.ime.keyboard.KeyCode
 import com.osfans.trime.ime.keyboard.KeyView
@@ -195,6 +197,20 @@ class T9AssistProbe(
                 check(plus.first != 0 && plus.second == 0)
                 check(KeyCode.parse("Control++") == (plus.first to KeyEvent.META_CTRL_ON))
                 check(KeyCode.parse("A") == (KeyEvent.KEYCODE_A to KeyEvent.META_SHIFT_ON))
+                // Issue #882: check the displayed label through the actual Key model
+                // and Android's virtual key character map, not just the key code.
+                val letterKeyboard = Keyboard(
+                    instrumentation.targetContext,
+                    theme,
+                    720,
+                    checkNotNull(theme.presetKeyboards["default"]).copy(
+                        labelTransform = TextKeyboard.LabelTransform.NONE,
+                    ),
+                )
+                for (letter in 'A'..'E') {
+                    val key = Key(letterKeyboard, theme, TextKeyboard.TextKey(click = KeyActionToken.Plain(letter.toString())))
+                    check(key.getLabel() == letter.toString()) { "Uppercase key $letter has label ${key.getLabel()}" }
+                }
                 for (literal in listOf("你好", "abc+xyz")) {
                     check(KeyAction(KeyActionToken.Plain(literal), theme.presetKeys).getText(keyboard) == literal)
                 }

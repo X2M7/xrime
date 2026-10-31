@@ -34,6 +34,17 @@ class OpenCCDataTest {
     }
 
     @Test
+    fun portableWindowsHostUsesExplicitCompilerAndArchiveTools() {
+        val args = openccZigCmakeArguments("Windows 11", "amd64", "D:/tools/zig.exe", "D:/tools/llvm-ar.exe", "D:/tools/llvm-ranlib.exe")
+        assertTrue(args.contains("-DCMAKE_CXX_COMPILER=D:/tools/zig.exe"))
+        assertTrue(args.contains("-DCMAKE_CXX_COMPILER_ARG1=c++ -U_WIN32_WINNT"))
+        assertTrue(args.contains("-DCMAKE_RC_COMPILER_ARG1=rc"))
+        assertTrue(args.contains("-DCMAKE_AR=D:/tools/llvm-ar.exe"))
+        assertFailsWith<IllegalStateException> { openccZigCmakeArguments("Linux", "amd64", "zig", "ar", "ranlib") }
+        assertFailsWith<IllegalStateException> { openccZigCmakeArguments("Windows", "arm64", "zig", "ar", "ranlib") }
+    }
+
+    @Test
     fun regionalDictionaryCannotBeSkippedWhileItsConfigIsShipped() {
         val directory = createTempDirectory("opencc-assets-test").toFile()
         try {

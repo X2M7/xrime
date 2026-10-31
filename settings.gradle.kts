@@ -35,6 +35,6 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "trime"
+rootProject.name = "xrime"
 include(":app")
 include(":codegen")

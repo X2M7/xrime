@@ -63,3 +63,17 @@ internal fun pickLandscape(
     landscapeValue: Int,
     landscape: Boolean,
 ): Int = if (landscape && landscapeValue > 0) landscapeValue else value
+
+/** Physical landscape affects height even when landscape layout mode is disabled. */
+internal fun resolveKeyboardHeightDp(
+    keyboardHeight: Int?,
+    keyboardHeightLand: Int?,
+    styleHeight: Int,
+    styleHeightLand: Int,
+    physicalLandscape: Boolean,
+    landscapeLayoutMode: Boolean,
+): Int {
+    val landscapeHeight = physicalLandscape || landscapeLayoutMode
+    val keyboard = keyboardHeight?.let { pickLandscape(it, keyboardHeightLand ?: 0, landscapeHeight) }
+    return resolvePositive(keyboard, pickLandscape(styleHeight, styleHeightLand, landscapeHeight))
+}

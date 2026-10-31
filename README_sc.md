@@ -4,6 +4,19 @@ SPDX-FileCopyrightText: 2015 - 2024 Rime community
 SPDX-License-Identifier: GPL-3.0-or-later
 -->
 
+# xrime
+
+xrime 是基于 [Trime](https://github.com/osfans/trime) 和 [X2M7/trime](https://github.com/X2M7/trime) 的独立 Android 输入法。应用 ID 为 `com.x2m7.xrime`，可与原 Trime 同时安装；旧应用的私有数据不会自动迁移。
+
+首个版本为 **Alpha 预发布版**，尚不能作为稳定替代品：部分上游问题仍待处理，完整 lint 仍有构建插件升级提示，音效包目录在特定文件名和 Android 运行环境下存在已知崩溃风险。详见 [验证记录](docs/xrime-verification.md)和 [上游问题清单](docs/xrime-upstream-issues.md)。
+
+发布 APK 分别支持 ARM64 和 x86_64，最低支持 Android 5.0。测试前请备份词典和配置。项目采用 [GPL-3.0-or-later](LICENSE) 许可证。
+
+[English](README.md) · [下载预发布版](https://github.com/X2M7/xrime/releases)
+
+<details>
+<summary>历史 X2M7/trime 说明（不代表 xrime 的发布状态）</summary>
+
 # 同文 Android 输入法平台
 
 ![build](https://github.com/X2M7/trime/actions/workflows/commit-ci.yml/badge.svg?branch=develop)
@@ -57,6 +70,8 @@ v3.3.13-t9.16 构建的 812 项应用 JVM 测试与 227 项宿主检查新执行
 源于开源的[注音仓颉输入法]前端，基于著名的 [RIME] 输入法框架，使用 JNI 的 C 语言和 Android 的 Java/Kotlin 语言书写，旨在保护汉语各地方言母语，音码、形码通用的输入法平台。
 
 [查看文档](https://github.com/osfans/trime/wiki)
+
+本项目内的配置说明：[横屏与液态键盘](doc/Keyboard.md) · [剪贴板规则](doc/ClipboardRules.md)。
 
 ## 九键拼音
 
@@ -201,3 +216,5 @@ Target "boost_log_setup" links to target "Boost::coroutine" but the target was n
 [注音仓颉输入法]: https://code.google.com/p/android-traditional-chinese-ime/
 [RIME]: http://rime.im
 [OpenCC]: https://github.com/BYVoid/OpenCC
+
+</details>

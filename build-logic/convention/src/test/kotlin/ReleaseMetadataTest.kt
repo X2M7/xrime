@@ -16,9 +16,9 @@ class ReleaseMetadataTest {
         versionName=3.3.13-t9.17
         versionCode=20261122
         previousVersionCode=20261121
-        repository=X2M7/trime
+        repository=X2M7/xrime
         branch=develop
-        applicationId=com.osfans.trime.debug
+        applicationId=com.x2m7.xrime
         certificateSha256=c6fb875b1959f56fc6b3992d603b86e2dcd793677d32aba83687b34ef6937dd2
         abis=arm64-v8a,x86_64
         """.trimIndent()
@@ -34,8 +34,8 @@ class ReleaseMetadataTest {
                 .map { File(it, "release.properties") }
                 .first { it.isFile }
         val metadata = ReleaseMetadata.parse(metadataFile.readText())
-        assertEquals("X2M7/trime", metadata.repository)
-        assertEquals("com.osfans.trime.debug", metadata.applicationId)
+        assertEquals("X2M7/xrime", metadata.repository)
+        assertEquals("com.x2m7.xrime", metadata.applicationId)
         assertTrue(metadata.versionCode > metadata.previousVersionCode)
         assertTrue(metadata.previousVersionCode >= 20261121)
     }
@@ -47,8 +47,8 @@ class ReleaseMetadataTest {
         assertEquals("v3.3.13-t9.17", metadata.tag)
         assertEquals(20261122, metadata.versionCode)
         assertEquals(20261121, metadata.previousVersionCode)
-        assertEquals("com.osfans.trime.debug", metadata.applicationId)
-        assertEquals("https://github.com/X2M7/trime", metadata.repositoryUrl)
+        assertEquals("com.x2m7.xrime", metadata.applicationId)
+        assertEquals("https://github.com/X2M7/xrime", metadata.repositoryUrl)
         assertEquals("develop", metadata.branch)
         assertEquals(listOf("arm64-v8a", "x86_64"), metadata.abis)
     }
@@ -91,7 +91,8 @@ class ReleaseMetadataTest {
 
     @Test
     fun `repository branch and APK ABI channel cannot be silently replaced`() {
-        reject(valid.replace("X2M7/trime", "osfans/trime"))
+        reject(valid.replace("X2M7/xrime", "osfans/trime"))
+        reject(valid.replace("X2M7/xrime", "X2M7/trime"))
         reject(valid.replace("branch=develop", "branch=master"))
         listOf("arm64-v8a", "x86_64,arm64-v8a", "arm64-v8a,arm64-v8a", "arm64-v8a,x86_64,x86").forEach {
             reject(valid.replace("abis=arm64-v8a,x86_64", "abis=$it"))
@@ -103,7 +104,7 @@ class ReleaseMetadataTest {
         listOf("v3.3.13-t9.17", "3.3", "trime", "3.3.13/evil").forEach {
             reject(valid.replace("versionName=3.3.13-t9.17", "versionName=$it"))
         }
-        reject(valid.replace("applicationId=com.osfans.trime.debug", "applicationId=com..trime"))
+        reject(valid.replace("applicationId=com.x2m7.xrime", "applicationId=com..trime"))
         reject(valid.replace("certificateSha256=c6fb875b", "certificateSha256=C6FB875B"))
         reject(valid.replace("certificateSha256=c6fb875b", "certificateSha256="))
     }

@@ -20,6 +20,7 @@ import com.osfans.trime.data.theme.ThemeManager
 import com.osfans.trime.ime.core.InputView
 import com.osfans.trime.ime.core.TrimeInputMethodService
 import com.osfans.trime.ime.keyboard.KeyView
+import com.osfans.trime.ime.keyboard.KeyboardWindow
 import com.osfans.trime.ime.popup.PopupAction
 import com.osfans.trime.ime.popup.PopupDelegate
 import com.osfans.trime.ime.popup.PopupEntryUi
@@ -162,7 +163,7 @@ object PopupColorRegression {
                 check(free.size == 4)
                 action(PopupAction.PreviewAction(ids[0], "A", trigger))
                 action(PopupAction.PreviewAction(ids[1], "ic@backspace_outline", trigger))
-                action(PopupAction.ShowKeyboardAction(ids[2], listOf("T9_backspace", "a", "b"), trigger))
+                action(PopupAction.ShowKeyboardAction(ids[2], listOf("T9_backspace", "a", "b", "Settings"), trigger))
                 check(free.size == 1)
             }
             withTimeout(10_000) { while (!main { entries.size == 3 && containers.size == 1 && entries.values.all { it.root.isShown && it.root.width > 0 } && (containers[ids[2]] as PopupKeyboardUi).root.height > 0 }) delay(50) }
@@ -170,6 +171,14 @@ object PopupColorRegression {
             val pooled = main { free.single() }
             val keyboard = main { containers[ids[2]] as PopupKeyboardUi }
             val keys = main { field<List<PopupKeyboardUi.PopupKeyUi>>(keyboard, "keyUis") }
+            val settingsLabel = main {
+                scope.theme.resolveAction("Settings").getLabel(input.di.direct.instance<KeyboardWindow>().currentKeyboard)
+            }
+            main {
+                check(settingsLabel.codePointCount(0, settingsLabel.length) > 1) { "Probe requires a multi-character Settings label" }
+                check(keys[3].textView.text.toString() == settingsLabel) { "Popup truncated the Settings label" }
+                check(keys[3].textView.visibility == View.VISIBLE && keys[3].textView.width <= keys[3].root.width)
+            }
             val views = main { visible.values.flatMap { descendants(it.root) } + descendants(keyboard.root) }
             val geometry = main { views.map(::bounds) }
             var expectedFocus = "T9_backspace"
@@ -198,7 +207,7 @@ object PopupColorRegression {
                 check(visible.getValue(ids[1]).imageView.visibility == View.VISIBLE)
                 val focused = field<Int>(keyboard, "focusedIndex")
                 pixels(input.context, checkNotNull(keyboard.root.background), scope.colors.popupBackColor, true)
-                check(keys.size == 3 && keys[0].imageView.visibility == View.VISIBLE)
+                check(keys.size == 4 && keys[0].imageView.visibility == View.VISIBLE)
                 keys.forEachIndexed { index, key ->
                     val color = if (index == focused) scope.colors.hilitedPopupTextColor else scope.colors.popupTextColor
                     check(key.textView.currentTextColor == color)
@@ -226,6 +235,15 @@ object PopupColorRegression {
             main { ColorManager.setColorSchemeForTesting(first) }
             main { verifyColors() }
             phase("popup scheme B to A preserves long-press text focus, geometry and editor state")
+            main {
+                val target = bounds(keys[3].root)
+                val origin = bounds(keyboard.root)
+                action(PopupAction.ChangeFocusAction(ids[2], target.exactCenterX() - origin.left + keyboard.offsetX, target.exactCenterY() - origin.top + keyboard.offsetY))
+                expectedFocus = "Settings"
+                verifyColors()
+                check(keys[3].textView.text.toString() == settingsLabel)
+            }
+            phase("popup preserves the complete Settings label and its underlying action")
             main {
                 action(PopupAction.PreviewAction(ids[3], "R", trigger))
                 check(entries[ids[3]] === pooled && free.isEmpty()) { "Popup did not reuse the recolored pooled entry" }

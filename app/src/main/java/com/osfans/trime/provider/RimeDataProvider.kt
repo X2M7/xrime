@@ -4,6 +4,7 @@
 
 package com.osfans.trime.provider
 
+import android.annotation.SuppressLint
 import android.content.res.AssetFileDescriptor
 import android.database.Cursor
 import android.database.MatrixCursor
@@ -15,6 +16,7 @@ import android.provider.DocumentsContract.Document
 import android.provider.DocumentsContract.Root
 import android.provider.DocumentsProvider
 import android.webkit.MimeTypeMap
+import androidx.annotation.RequiresApi
 import com.osfans.trime.R
 import com.osfans.trime.core.data.SyncRelativePath
 import java.io.File
@@ -185,6 +187,44 @@ class RimeDataProvider : DocumentsProvider() {
         false
     }
 
+    @RequiresApi(Build.VERSION_CODES.O)
+    private object Api26DirectoryEntries {
+        fun list(directory: File, limit: Int): List<File> {
+            val result = ArrayList<File>()
+            try {
+                java.nio.file.Files.newDirectoryStream(directory.toPath()).use { stream ->
+                    for (entry in stream) {
+                        if (result.size >= limit) throw FileNotFoundException("Document directory exceeds its traversal budget")
+                        result.add(entry.toFile())
+                    }
+                }
+            } catch (failure: java.nio.file.DirectoryIteratorException) {
+                throw FileNotFoundException("Cannot list document directory").apply { initCause(failure) }
+            } catch (failure: IOException) {
+                if (failure is FileNotFoundException) throw failure
+                throw FileNotFoundException("Cannot list document directory").apply { initCause(failure) }
+            }
+            return result
+        }
+    }
+
+    private fun boundedChildren(directory: File, limit: Int): List<File> {
+        if (limit < 0) throw FileNotFoundException("Document tree exceeds its traversal budget")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) return Api26DirectoryEntries.list(directory, limit)
+        // Legacy File.listFiles allocates the directory array before its size can be checked.
+        val files = directory.listFiles() ?: throw FileNotFoundException("Cannot list document directory")
+        if (files.size > limit) throw FileNotFoundException("Document directory exceeds its traversal budget")
+        return files.asList()
+    }
+
+    private fun preflightTree(tree: File, root: RootState, maxBytes: Long = Long.MAX_VALUE): List<DocumentsTreeBudget.Node> =
+        DocumentsTreeBudget.snapshot(
+            tree,
+            maxBytes = maxBytes,
+            allowed = { isDirectPath(root.baseDir, it) && isContained(root.baseDir, it) },
+            children = ::boundedChildren,
+        )
+
     override fun onCreate(): Boolean = true
 
     override fun queryRoots(projection: Array<String>?): Cursor {
@@ -218,8 +258,7 @@ class RimeDataProvider : DocumentsProvider() {
         sortOrder: String?,
     ) = MatrixCursor(projection ?: DEFAULT_DOCUMENT_PROJECTION).apply {
         val root = requireRootState()
-        val children = fileFromDocId(parentDocumentId, root).listFiles()
-            ?: throw FileNotFoundException("Cannot list $parentDocumentId")
+        val children = boundedChildren(fileFromDocId(parentDocumentId, root), DocumentsTreeBudget.MAX_NODES)
         children.filter { isDirectPath(root.baseDir, it) }.forEach {
             newRowFromFile(it, root)
         }
@@ -278,15 +317,11 @@ class RimeDataProvider : DocumentsProvider() {
         val root = requireRootState()
         fileFromDocId(documentId, root).apply {
             check(this != root.baseDir) { "Cannot delete provider root" }
-            requireContainedTree(this, root)
-            val ok =
-                if (isDirectory) {
-                    deleteRecursively()
-                } else {
-                    delete()
-                }
-            if (!ok) {
-                throw FileNotFoundException("deleteDocument id=$documentId failed")
+            val tree = preflightTree(this, root)
+            for (node in tree.asReversed()) {
+                if (!isDirectPath(root.baseDir, node.file) || !node.file.exists() ||
+                    node.file.isDirectory != node.directory || !node.file.delete()
+                ) throw FileNotFoundException("deleteDocument id=$documentId failed")
             }
         }
     }
@@ -313,22 +348,32 @@ class RimeDataProvider : DocumentsProvider() {
     ): String {
         val root = requireRootState()
         val oldFile = fileFromDocId(sourceDocumentId, root)
-        requireContainedTree(oldFile, root)
+        val tree = preflightTree(oldFile, root, DocumentsTreeBudget.MAX_COPY_BYTES)
         val newFile = createAbstractFile(targetParentDocumentId, oldFile.name, root)
         check(!isContained(oldFile, newFile)) { "Cannot copy into the source tree" }
-        oldFile.apply {
+        val bytes = tree.sumOf { it.size }
+        // Conservative preflight only: do not clear other apps' caches or claim
+        // that free space remains reserved throughout the copy.
+        @SuppressLint("UsableSpace")
+        val available = newFile.parentFile?.usableSpace ?: 0L
+        if (available > 0 && bytes > available) throw FileNotFoundException("Insufficient space for document copy")
+        for (node in tree) {
+            val target = if (node.file == oldFile) newFile else File(newFile, node.file.relativeTo(oldFile).path)
+            if (!isDirectPath(root.baseDir, node.file) || !node.file.exists() || node.file.isDirectory != node.directory ||
+                !isDirectPath(root.baseDir, target) || target.exists()
+            ) throw FileNotFoundException("copyDocument source or target changed")
             try {
-                val ok =
-                    if (isDirectory) {
-                        copyRecursively(newFile)
-                    } else {
-                        copyTo(newFile).exists()
+                if (node.directory) {
+                    if (!target.mkdir()) throw IOException("Cannot create document directory")
+                } else {
+                    if (node.file.length() != node.size) throw IOException("Source document changed before copy")
+                    node.file.inputStream().use { input ->
+                        if (!target.createNewFile()) throw IOException("Document target already exists")
+                        target.outputStream().use { output -> DocumentsCopyBudget.copy(input, output, node.size) }
                     }
-                if (!ok) {
-                    throw FileNotFoundException("copyDocument id=$sourceDocumentId to ${newFile.docId(root)} failed")
                 }
-            } catch (e: Exception) {
-                throw FileNotFoundException("copyDocument id=$sourceDocumentId to ${newFile.docId(root)} failed: ${e.message}")
+            } catch (failure: IOException) {
+                throw FileNotFoundException("copyDocument failed").apply { initCause(failure) }
             }
         }
         return newFile.docId(root)
@@ -361,6 +406,7 @@ class RimeDataProvider : DocumentsProvider() {
         val oldFile = fileFromDocId(sourceDocumentId, root)
         check(oldFile != root.baseDir) { "Cannot move provider root" }
         check(oldFile.parentFile == fileFromDocId(sourceParentDocumentId, root)) { "Incorrect source parent" }
+        preflightTree(oldFile, root)
         val newFile = createAbstractFile(targetParentDocumentId, oldFile.name, root)
         if (!oldFile.renameTo(newFile)) throw FileNotFoundException("Cannot move $sourceDocumentId")
         return newFile.docId(root)
@@ -374,15 +420,9 @@ class RimeDataProvider : DocumentsProvider() {
     ) = MatrixCursor(projection ?: DEFAULT_DOCUMENT_PROJECTION).apply {
         val root = requireRootState()
         val q = query.lowercase()
-        val visited = mutableSetOf<String>()
-        fileFromDocId(rootId, root)
-            .walk()
-            .onEnter { file ->
-                file.canonicalFileOrNull()?.takeIf {
-                    isDirectPath(root.baseDir, file) && isContained(root.baseDir, it)
-                }?.path?.let(visited::add) == true
-            }
-            .filter { isDirectPath(root.baseDir, it) }
+        preflightTree(fileFromDocId(rootId, root), root)
+            .asSequence()
+            .map { it.file }
             .filter { it.name.lowercase().contains(q) }
             .take(SEARCH_RESULTS_LIMIT)
             .forEach { newRowFromFile(it, root) }
@@ -393,22 +433,6 @@ class RimeDataProvider : DocumentsProvider() {
         TEXT_EXTENSIONS.contains(extension) -> MIME_TYPE_TEXT
         root.textFilePaths.contains(absolutePath) -> MIME_TYPE_TEXT
         else -> MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension) ?: MIME_TYPE_BIN
-    }
-
-    private fun requireContainedTree(
-        treeRoot: File,
-        root: RootState,
-    ) {
-        val visited = mutableSetOf<String>()
-        treeRoot.walkTopDown().onEnter {
-            val canonicalPath = it.canonicalFileOrNull()?.path
-            check(isDirectPath(root.baseDir, it) && canonicalPath != null && visited.add(canonicalPath)) {
-                "Unsafe or recursive document tree"
-            }
-            true
-        }.forEach {
-            check(isDirectPath(root.baseDir, it)) { "Document escapes provider root" }
-        }
     }
 
     private fun createAbstractFile(
@@ -422,6 +446,7 @@ class RimeDataProvider : DocumentsProvider() {
         var newFile = parent.resolve(displayName)
         var noConflictId = 2
         while (newFile.exists()) {
+            if (noConflictId > DocumentsTreeBudget.MAX_NODES) throw FileNotFoundException("Too many documents with this name")
             newFile = parent.resolve("$displayName ($noConflictId)")
             noConflictId += 1
         }

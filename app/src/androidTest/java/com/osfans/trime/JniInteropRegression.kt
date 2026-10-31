@@ -5,6 +5,7 @@ import android.system.ErrnoException
 import android.system.Os
 import android.system.OsConstants
 import android.util.Log
+import com.osfans.trime.core.Rime
 import com.osfans.trime.core.RimeConfig
 import com.osfans.trime.core.data.DataManager
 import com.osfans.trime.data.opencc.OpenCCDictManager
@@ -15,6 +16,8 @@ import java.util.UUID
 
 internal object JniInteropRegression {
     fun verify() {
+        verifyInvalidSchemaArray()
+        verifyInvalidCandidateRanges()
         verifyDictionaryConversions()
         verifyConfigFailureResources()
         val supplementary = "\uD842\uDFB7\uD83C\uDF0F"
@@ -57,6 +60,29 @@ internal object JniInteropRegression {
                 check(content.delete())
             }
         }
+    }
+
+    private fun verifyInvalidSchemaArray() {
+        val original = Rime.getSelectedRimeSchemaList().toList()
+        @Suppress("UNCHECKED_CAST")
+        val invalid = arrayOfNulls<String>(1) as Array<String>
+        val failure = runCatching { Rime.selectRimeSchemas(invalid) }.exceptionOrNull()
+        check(failure is Exception && failure.message == "Invalid string array element") {
+            "JNI did not reject the null schema element as a Java exception: $failure"
+        }
+        check(Rime.getSelectedRimeSchemaList().toList() == original) {
+            "Rejecting an invalid schema array changed the selected schemas"
+        }
+    }
+
+    private fun verifyInvalidCandidateRanges() {
+        for ((start, limit) in listOf(-1 to 1, 0 to -1, 0 to 0, 0 to 145)) {
+            val failure = runCatching { Rime.getRimeCandidates(start, limit) }.exceptionOrNull()
+            check(failure is Exception && failure.message == "Invalid candidate range") {
+                "JNI did not reject candidate range $start/$limit: $failure"
+            }
+        }
+        Rime.getRimeCandidates(0, 1)
     }
 
     private fun verifyConfigFailureResources() {

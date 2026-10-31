@@ -16,6 +16,9 @@ SPDX-License-Identifier: GPL-3.0-or-later
         <intent>
             <action android:name="android.intent.action.TTS_SERVICE" />
         </intent>
+        <intent>
+            <action android:name="android.view.InputMethod" />
+        </intent>
     </queries>
 
     <application
@@ -54,6 +57,12 @@ SPDX-License-Identifier: GPL-3.0-or-later
                 <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
             </intent-filter>
         </provider>
+
+        <provider
+            android:name=".provider.ClipboardImageProvider"
+            android:authorities="${applicationId}.clipboard-image"
+            android:exported="false"
+            android:grantUriPermissions="true" />
 
         <provider
             android:name="androidx.core.content.FileProvider"
@@ -126,7 +135,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
             android:excludeFromRecents="true"
             android:label="@string/edit"
             android:launchMode="singleInstance"
-            android:taskAffinity=".ui.main.LiquidKeyboardEditActivity"
+            android:taskAffinity="${applicationId}.ui.main.LiquidKeyboardEditActivity"
             android:theme="@style/Theme.DialogTheme"
             android:windowSoftInputMode="stateAlwaysVisible|adjustPan" />
 

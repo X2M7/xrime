@@ -11,6 +11,22 @@ sealed class RimeMessage<T>(
     var editorToken: Long = 0
         internal set
 
+    /** Accepted input lineage, or zero for work outside an editor input chain. */
+    var inputAdmission: Long = 0
+        internal set
+
+    @Volatile private var rejectedForClipboardSearch = false
+
+    internal fun isRejectedForClipboardSearch(): Boolean = rejectedForClipboardSearch
+
+    /** All subscribers share this message; only the first rejects and tears down the session. */
+    @Synchronized
+    internal fun rejectForClipboardSearch(): Boolean {
+        if (rejectedForClipboardSearch) return false
+        rejectedForClipboardSearch = true
+        return true
+    }
+
     var snapshot: CandidateSnapshot = CandidateSnapshot.EMPTY
         internal set
 
@@ -133,6 +149,12 @@ sealed class RimeMessage<T>(
 
     data class T9Message(override val data: T9StateProto) : RimeMessage<T9StateProto>(data) {
         override val messageType = MessageType.T9
+    }
+
+    /** Internal ordered marker; reuses Unknown without changing JNI message ordinals. */
+    data class InputBarrierMessage(override val data: Data) : RimeMessage<InputBarrierMessage.Data>(data) {
+        data class Data(val epoch: Long, val sequence: Long)
+        override val messageType = MessageType.Unknown
     }
 
     enum class MessageType {

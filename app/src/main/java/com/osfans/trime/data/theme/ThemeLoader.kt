@@ -15,6 +15,8 @@ import com.osfans.trime.util.appContext
 import com.osfans.trime.util.isNull
 import com.osfans.trime.util.mapping
 import com.osfans.trime.util.pairs
+import com.osfans.trime.util.readTextAtMostCodePoints
+import com.osfans.trime.util.TextReadLimitExceeded
 import com.osfans.trime.util.untagged
 import com.osfans.trime.util.yamlMapOf
 import com.osfans.trime.util.yamlScalarOf
@@ -140,6 +142,9 @@ object ThemeLoader {
             decodeAndReport(themeId, expandSource(themeId, node) { id -> sources.load(id, null) })
         } catch (e: CancellationException) {
             throw e
+        } catch (e: TextReadLimitExceeded) {
+            // Do not pass an oversized source on to the native deployment fallback.
+            return ThemeLoadResult.Failure(themeId, ThemeLoadError.FileUnreadable(themeId, e.source, e))
         } catch (e: ThemeDslExpander.UnsupportedDsl) {
             // Selecting the full native parser is normal for supported librime themes.
             // A failed native rebuild still returns a structured DeploymentFailure.
@@ -180,7 +185,10 @@ object ThemeLoader {
         }
         val findings =
             runCatching { ThemeDiagnostics.lint(theme, mapping) }
-                .onFailure { Timber.w(it, "Theme '%s': diagnostics failed", themeId) }
+                .onFailure {
+                    if (it is CancellationException) throw it
+                    Timber.w(it, "Theme '%s': diagnostics failed", themeId)
+                }
                 .getOrNull()
         findings?.let { ThemeDiagnostics.log(themeId, it) }
         return ThemeLoadResult.Success(themeId, theme, findings)
@@ -274,7 +282,7 @@ object ThemeLoader {
         private fun readAndPatch(resourceId: String, file: File): YamlNode {
             // Parsing failures are not equivalent to an absent optional resource:
             // propagate them so the caller delegates the complete file to librime.
-            val node = ThemeYaml.parser.parseToYamlNode(file.readText())
+            val node = ThemeYaml.parser.parseToYamlNode(file.readTextAtMostCodePoints(ThemeYaml.CODE_POINT_LIMIT))
             val patched = applyCustomPatch(resourceId, node)
             if (patched === node) return node
 
@@ -361,7 +369,9 @@ object ThemeLoader {
         }
         val content =
             try {
-                file.readText()
+                file.readTextAtMostCodePoints(ThemeYaml.CODE_POINT_LIMIT)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 return ThemeLoadResult.Failure(
                     themeId,
@@ -372,6 +382,8 @@ object ThemeLoader {
         val node =
             try {
                 ThemeYaml.parser.parseToYamlNode(content)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 return ThemeLoadResult.Failure(
                     themeId,
@@ -385,6 +397,8 @@ object ThemeLoader {
 
         return try {
             decodeAndReport(themeId, mapping)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             ThemeLoadResult.Failure(
                 themeId,

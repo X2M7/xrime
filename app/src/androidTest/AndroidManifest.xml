@@ -2,16 +2,106 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     android:versionCode="1"
     android:versionName="1.0">
+    <permission
+        android:name="com.x2m7.xrime.test.PRIVATE_FIXTURE_READ"
+        android:protectionLevel="signature" />
     <instrumentation
         android:name="com.osfans.trime.StartupResponsivenessInstrumentation"
-        android:targetPackage="com.osfans.trime.debug" />
+        android:targetPackage="com.x2m7.xrime" />
+    <instrumentation
+        android:name="com.osfans.trime.SoundFileAccessInstrumentation"
+        android:targetPackage="com.x2m7.xrime" />
+    <instrumentation
+        android:name="com.osfans.trime.ClipboardSuggestionInstrumentation"
+        android:targetPackage="com.x2m7.xrime" />
     <instrumentation
         android:name="com.osfans.trime.UserDictionaryUpgradeInstrumentation"
-        android:targetPackage="com.osfans.trime.debug" />
+        android:targetPackage="com.x2m7.xrime" />
     <instrumentation
         android:name="com.osfans.trime.CoroutineFastPackagingInstrumentation"
-        android:targetPackage="com.osfans.trime.debug" />
+        android:targetPackage="com.x2m7.xrime" />
     <instrumentation
         android:name="com.osfans.trime.CoroutineSlowPackagingInstrumentation"
-        android:targetPackage="com.osfans.trime.debug" />
+        android:targetPackage="com.x2m7.xrime" />
+    <instrumentation
+        android:name="com.osfans.trime.LegacyKeyboardGeometryInstrumentation"
+        android:targetPackage="com.x2m7.xrime" />
+    <instrumentation
+        android:name="com.osfans.trime.Api24SafPickerInstrumentation"
+        android:targetPackage="com.x2m7.xrime" />
+    <instrumentation
+        android:name="com.osfans.trime.NavigationColor1869Instrumentation"
+        android:targetPackage="com.x2m7.xrime" />
+    <instrumentation
+        android:name="com.osfans.trime.Theme2016Instrumentation"
+        android:targetPackage="com.x2m7.xrime" />
+    <instrumentation
+        android:name="com.osfans.trime.ClipboardImageMigrationInstrumentation"
+        android:targetPackage="com.x2m7.xrime" />
+    <instrumentation
+        android:name="com.osfans.trime.ColorPickerColdStartInstrumentation"
+        android:targetPackage="com.x2m7.xrime" />
+    <instrumentation
+        android:name="com.osfans.trime.MacroOrderInstrumentation"
+        android:targetPackage="com.x2m7.xrime" />
+    <instrumentation
+        android:name="com.osfans.trime.ConfigScalarRoundTripInstrumentation"
+        android:targetPackage="com.x2m7.xrime" />
+    <instrumentation
+        android:name="com.osfans.trime.Issue2145ThemeInstrumentation"
+        android:targetPackage="com.x2m7.xrime" />
+    <instrumentation
+        android:name="com.osfans.trime.ClipboardImageAdmissionInstrumentation"
+        android:targetPackage="com.x2m7.xrime" />
+    <instrumentation
+        android:name="com.osfans.trime.ClipboardImageRepositoryInstrumentation"
+        android:targetPackage="com.x2m7.xrime" />
+    <instrumentation
+        android:name="com.osfans.trime.ClipboardImageCaptureInstrumentation"
+        android:targetPackage="com.x2m7.xrime" />
+    <instrumentation
+        android:name="com.osfans.trime.ClipboardImageProviderInstrumentation"
+        android:targetPackage="com.x2m7.xrime" />
+    <instrumentation
+        android:name="com.osfans.trime.ClipboardImageListenerInstrumentation"
+        android:targetPackage="com.x2m7.xrime" />
+    <instrumentation
+        android:name="com.osfans.trime.ExternalSettingsRouteInstrumentation"
+        android:targetPackage="com.x2m7.xrime" />
+    <instrumentation
+        android:name="com.osfans.trime.DocumentsTreeBudgetInstrumentation"
+        android:targetPackage="com.x2m7.xrime" />
+    <instrumentation
+        android:name="com.osfans.trime.DictionaryTransferInstrumentation"
+        android:targetPackage="com.x2m7.xrime" />
+    <instrumentation
+        android:name="com.osfans.trime.ClipboardImageSendInstrumentation"
+        android:targetPackage="com.x2m7.xrime" />
+    <instrumentation
+        android:name="com.osfans.trime.ClipboardPrivateCopyInstrumentation"
+        android:targetPackage="com.x2m7.xrime" />
+    <instrumentation
+        android:name="com.osfans.trime.SoundPickerColdStartInstrumentation"
+        android:targetPackage="com.x2m7.xrime" />
+    <instrumentation
+        android:name="com.osfans.trime.Issue1556Instrumentation"
+        android:targetPackage="com.x2m7.xrime" />
+    <application>
+        <activity
+            android:name="com.osfans.trime.ExternalSettingsRouteFixtureActivity"
+            android:exported="true" />
+        <activity
+            android:name="com.osfans.trime.ClipboardImageExternalEditorActivity"
+            android:exported="true" />
+        <provider
+            android:name="com.osfans.trime.ClipboardImageExternalStateProvider"
+            android:authorities="com.x2m7.xrime.test.imageeditor"
+            android:exported="true" />
+        <provider
+            android:name="com.osfans.trime.ClipboardImageFixtureProvider"
+            android:authorities="com.x2m7.xrime.test.imagefixture"
+            android:readPermission="com.x2m7.xrime.test.PRIVATE_FIXTURE_READ"
+            android:exported="true"
+            android:grantUriPermissions="true" />
+    </application>
 </manifest>

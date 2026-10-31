@@ -13,6 +13,9 @@ import kotlinx.coroutines.flow.SharedFlow
 interface RimeApi {
     val messageFlow: SharedFlow<RimeMessage<*>>
 
+    /** Publish an ordered numeric marker on the native dispatcher. */
+    suspend fun publishInputBarrier(epoch: Long, sequence: Long)
+
     val isReady: Boolean
 
     val usingExistingResources: Boolean
@@ -82,6 +85,9 @@ interface RimeApi {
     suspend fun simulateKeySequence(
         sequence: String,
     ): Boolean
+
+    /** Publish literal macro text in the same ordered editor stream as native key responses. */
+    suspend fun emitLiteralMacroText(text: String)
 
     suspend fun selectCandidate(idx: Int, global: Boolean, expectedSnapshot: CandidateSnapshot? = null): Boolean
 

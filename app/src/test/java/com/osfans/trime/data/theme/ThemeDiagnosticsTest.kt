@@ -21,7 +21,7 @@ class ThemeDiagnosticsTest :
         // The Android key-name lookup is a platform call that throws when not
         // mocked; the bare letters used by the fixtures resolve without it.
         val platformLookup = KeyCode.androidKeyNameToCode
-        beforeSpec { KeyCode.androidKeyNameToCode = { 0 } }
+        beforeTest { KeyCode.androidKeyNameToCode = { 0 } }
         afterSpec { KeyCode.androidKeyNameToCode = platformLookup }
 
         /** Hex-only color parser; enough to tell colors from typos. */

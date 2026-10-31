@@ -51,8 +51,8 @@ data class ReleaseMetadata(
             }
             fun value(key: String) = values.getValue(key)
 
-            require(value("repository") == "X2M7/trime" && value("branch") == "develop") {
-                "Only X2M7/trime:develop may publish"
+            require(value("repository") == "X2M7/xrime" && value("branch") == "develop") {
+                "Only X2M7/xrime:develop may publish"
             }
             require(Regex("[0-9]+(?:\\.[0-9]+){2}(?:-[A-Za-z0-9.-]+)?").matches(value("versionName"))) {
                 "Invalid versionName"

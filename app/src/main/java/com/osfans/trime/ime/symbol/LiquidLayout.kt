@@ -127,6 +127,8 @@ class LiquidLayout(
 
     val recyclerView =
         recyclerView {
+            // Edge stretch must not consume the next symbol or tab selection.
+            overScrollMode = android.view.View.OVER_SCROLL_NEVER
             val space = dp(theme.liquidKeyboard.marginX.toInt())
             addItemDecoration(SpacesItemDecoration(space))
             setPadding(space)

@@ -9,11 +9,13 @@ import android.annotation.SuppressLint
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import androidx.core.os.ConfigurationCompat
 import androidx.navigation.fragment.findNavController
 import androidx.preference.Preference
 import com.osfans.trime.BuildConfig
 import com.osfans.trime.R
 import com.osfans.trime.ui.common.PaddingPreferenceFragment
+import com.osfans.trime.ui.common.dialog.PublicAlertDialogs
 import com.osfans.trime.util.Const
 import com.osfans.trime.util.addCategory
 import com.osfans.trime.util.addPreference
@@ -69,12 +71,13 @@ class AboutFragment : PaddingPreferenceFragment() {
             addCategory("") {
                 isIconSpaceReserved = false
                 addPreference(R.string.privacy_policy) {
-                    startActivity(
-                        Intent(
-                            Intent.ACTION_VIEW,
-                            Uri.parse(Const.PRIVACY_POLICY_URL),
-                        ),
-                    )
+                    val language = ConfigurationCompat.getLocales(resources.configuration)[0]?.language.orEmpty()
+                    val notice = resources.openRawResource(R.raw.privacy_notice).bufferedReader(Charsets.UTF_8).use { it.readText() }
+                    PublicAlertDialogs.builder(requireContext())
+                        .setTitle(R.string.privacy_policy)
+                        .setMessage(localizedPrivacyNotice(notice, language))
+                        .setPositiveButton(android.R.string.ok, null)
+                        .show()
                 }
                 addPreference(R.string.source_code, R.string.git_repo) {
                     startActivity(

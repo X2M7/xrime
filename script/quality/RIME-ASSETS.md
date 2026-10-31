@@ -2,8 +2,18 @@
 
 `prepareRimeAssets` runs after `installOpenCCData` and before checksum generation.
 It copies source assets into `app/build/generated/rimeAssets`. The pinned Rime
-submodules and the symlinks in `src/main/assets` are not edited. Android packages
-the prepared directory plus `app/build/generated/rimeChecksums`.
+submodules and the symlinks in `src/main/assets` are not edited. Checksums describe
+the complete logical resources in that directory. `packageRimeAssets` creates a
+separate packaged copy, replacing the filtered Luna essay with a versioned patch;
+Android packages this copy plus `app/build/generated/rimeChecksums`.
+
+The installer reconstructs the logical Luna essay from the packaged base essay and
+patch. It checks bounded ordered deletion ranges and both SHA-256 digests before
+publishing a same-directory temporary file with a single rename. The logical path
+and checksum stay in the descriptor, so unchanged upgrades retain their existing
+file and a missing file is regenerated. This saves package bytes; the installed
+vocabulary still occupies its full size. Re-test fresh/offline install, upgrade,
+missing-file recovery and actual native deployment after changing the format.
 
 Only the packaged `luna_pinyin.dict.yaml` header selects `luna_pinyin_essay` and
 gets a `-trime-v1` version suffix. Its TSV body and upstream attribution remain

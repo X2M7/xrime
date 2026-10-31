@@ -12,7 +12,6 @@ import com.osfans.trime.data.prefs.AppPrefs
 import com.osfans.trime.data.prefs.keyboardHeightOverride
 import com.osfans.trime.data.theme.Theme
 import com.osfans.trime.data.theme.model.TextKeyboard
-import com.osfans.trime.data.theme.model.orAbsent
 import com.osfans.trime.ime.keyboard.KeyboardPrefs.isLandscapeMode
 import splitties.bitflags.hasFlag
 import splitties.dimensions.dp
@@ -27,6 +26,7 @@ class Keyboard(
     private val allowedWidth: Int,
     selfConfig: TextKeyboard? = null,
     heightBudgetPx: Int = 0,
+    val pairedHeightPx: Int = 0,
 ) {
 
     /** 按鍵默認水平間距  */
@@ -36,7 +36,7 @@ class Keyboard(
     /** 默認鍵寬  */
     private val keyWidth: Int = (allowedWidth * theme.style.keyWidth / 100).toInt()
 
-    /** 默認鍵高 (NOTE: 无需 dp 转换，会被 keyboardHeight 等比例缩放) */
+    /** 默認鍵高 (dp, also used as a relative weight with an explicit total height). */
     private val keyHeight: Int =
         resolvePositive(selfConfig?.height?.toInt(), theme.style.keyHeight)
 
@@ -103,22 +103,19 @@ class Keyboard(
         (keyWidth * SEARCH_DISTANCE).pow(2).toInt() // Square it for comparison
     val isLock = selfConfig?.lock ?: false // 切換程序時記憶鍵盤
     val asciiKeyboard: String? = selfConfig?.asciiKeyboard // 英文鍵盤
+    private val measuredRows = selfConfig?.let { measureKeyboardRows(it, allowedWidth, theme.style.keyWidth, keyHeight) }.orEmpty()
 
     val requestedKeyboardHeight: Int =
-        resolvePositive(
-            selfConfig?.let {
-                pickLandscape(
-                    it.keyboardHeight,
-                    it.keyboardHeightLand,
-                    context.isLandscapeMode() || (isT9Layout && context.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE),
-                )
-            },
-            pickLandscape(
+        context.dp(
+            resolveKeyboardHeightDp(
+                selfConfig?.keyboardHeight,
+                selfConfig?.keyboardHeightLand,
                 theme.style.keyboardHeight,
                 theme.style.keyboardHeightLand,
+                context.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE,
                 context.isLandscapeMode(),
             ),
-        ) { context.dp(it) }.let { themedHeight ->
+        ).let { themedHeight ->
             val display = context.resources.displayMetrics
             val override = keyboardHeightOverride(
                 (display.heightPixels / display.density).toInt(),
@@ -130,12 +127,14 @@ class Keyboard(
                 val preferred = AppPrefs.defaultInstance().keyboard.t9KeyHeight.getValue()
                 context.dp(T9LayoutPolicy.height((display.heightPixels / display.density).toInt(), (themedHeight / display.density).toInt(), preferred))
             } else {
-                themedHeight
+                resolveKeyboardHeightPx(themedHeight, measuredRows, !selfConfig?.keys.isNullOrEmpty()) { context.dp(it) }
             }
         }
 
     // Keep the four real 48dp rows. A smaller viewport scrolls this full model.
-    val keyboardHeight: Int = if (isT9Layout && heightBudgetPx > 0) {
+    val keyboardHeight: Int = if (pairedHeightPx > 0) {
+        pairedHeightPx
+    } else if (isT9Layout && heightBudgetPx > 0) {
         T9LayoutPolicy.modelHeight(requestedKeyboardHeight, heightBudgetPx, context.dp(192))
     } else {
         requestedKeyboardHeight
@@ -148,7 +147,7 @@ class Keyboard(
         if (selfConfig != null) {
 
             val keys = selfConfig.keys
-            val keyboardKeyWidth = selfConfig.width
+            val keyboardKeyWidth = resolveKeyboardKeyWidth(selfConfig.width, theme.style.keyWidth)
 
             val maxColumns = if (selfConfig.columns == -1) Int.MAX_VALUE else selfConfig.columns
 
@@ -158,52 +157,8 @@ class Keyboard(
             val oneWeightWidthPx =
                 allowedWidth.toFloat() / (MAX_TOTAL_WEIGHT * (1 + splitRatio))
 
-            // total width weight for each row.
-            val rowWidthTotalWeight = mutableListOf<Float>()
-
-            // raw height of each row before scaling
-            val rowRawHeight = mutableListOf<Int>()
-
-            var x = 0
-            var column = 0
-            var rowHeight = keyHeight
-            var totalKeyWidth = 0f
-
-            // determine row count, row heights, total row weights; does not create Key objects
-            for (key in keys) {
-
-                // determine the width weight of this key
-                val keyWidthWeight =
-                    if (key.width == 0f && key.click.orAbsent != null) keyboardKeyWidth else key.width
-
-                val widthPx = (keyWidthWeight * allowedWidth / MAX_TOTAL_WEIGHT).toInt()
-
-                // wrap to next row if column or width limit is reached
-                if (column >= maxColumns || x + widthPx > allowedWidth) {
-                    rowWidthTotalWeight.add(totalKeyWidth)
-                    rowRawHeight.add(rowHeight)
-                    x = 0
-                    column = 0
-                    totalKeyWidth = 0f
-                }
-
-                // first key of a row defines the row height
-                if (column == 0) {
-                    rowHeight = if (key.height > 0) key.height.toInt() else keyHeight
-                }
-
-                totalKeyWidth += keyWidthWeight
-
-                // only clickable keys count toward column count
-                if (key.click.orAbsent != null) {
-                    column++
-                }
-
-                x += widthPx
-            }
-
-            rowWidthTotalWeight.add(totalKeyWidth)
-            rowRawHeight.add(rowHeight)
+            val rowWidthTotalWeight = measuredRows.map { it.widthWeight }
+            val rowRawHeight = measuredRows.map { it.heightDp }
 
             val rows = rowRawHeight.size
             val rawHeightSum = rowRawHeight.sum()
@@ -227,7 +182,7 @@ class Keyboard(
             var yPos = 0
 
             var row = 0
-            column = 0
+            var column = 0
 
             var rowWeightAccumulo = 0f
             var currentRowHeight = rowHeightScaled[0]
@@ -243,7 +198,7 @@ class Keyboard(
             for (textKey in keys) {
 
                 val keyWidthWeight =
-                    if (textKey.width == 0f && textKey.click.orAbsent != null) keyboardKeyWidth else textKey.width
+                    if (textKey.width == 0f && textKey.hasKeyboardSlot) keyboardKeyWidth else textKey.width
 
                 var widthPx = (keyWidthWeight * oneWeightWidthPx).toInt()
 
@@ -276,7 +231,7 @@ class Keyboard(
                     }
                 }
 
-                if (textKey.click.orAbsent == null) {
+                if (!textKey.hasKeyboardSlot) {
                     if (expandKeypressArea) spacers.add(Triple(xPos, widthPx, row))
                     xPos += widthPx
                     continue

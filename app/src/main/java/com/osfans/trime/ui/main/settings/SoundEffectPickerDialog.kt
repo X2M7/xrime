@@ -8,6 +8,7 @@ import android.app.AlertDialog
 import android.content.Context
 import androidx.lifecycle.LifecycleCoroutineScope
 import com.osfans.trime.R
+import com.osfans.trime.data.prefs.AppPrefs
 import com.osfans.trime.data.soundeffect.SoundEffectManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -20,7 +21,7 @@ object SoundEffectPickerDialog {
     ): AlertDialog {
         val effects = withContext(Dispatchers.IO) { SoundEffectManager.getAllSoundEffects() }
         val all = effects.map { it.name }
-        val current = SoundEffectManager.activeSoundEffect?.name ?: ""
+        val current = AppPrefs.defaultInstance().keyboard.customSoundEffect.getValue()
         val currentIndex = all.indexOfFirst { it == current }
         return AlertDialog
             .Builder(context)

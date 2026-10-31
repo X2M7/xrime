@@ -35,20 +35,27 @@ class DataChecksumsPlugin : Plugin<Project> {
 
     override fun apply(target: Project) {
         val prepared = target.layout.buildDirectory.dir("generated/rimeAssets")
+        val packaged = target.layout.buildDirectory.dir("generated/rimePackagedAssets")
         val checksums = target.layout.buildDirectory.dir("generated/rimeChecksums")
         val prepare = target.tasks.register<PrepareRimeAssetsTask>("prepareRimeAssets") {
             inputDir.set(target.assetsDir)
+            rimeDataDir.set(target.layout.projectDirectory.dir("data/rime"))
             outputDir.set(prepared)
             reportDir.set(target.layout.buildDirectory.dir("reports/rime-assets"))
             dependsOn(OpenCCDataPlugin.INSTALL_TASK)
         }
+        val packageAssets = target.tasks.register<PackageRimeAssetsTask>("packageRimeAssets") {
+            dependsOn(prepare)
+            inputDir.set(prepared)
+            outputDir.set(packaged)
+        }
         target.extensions.getByType<ApplicationExtension>().sourceSets.getByName("main").assets.directories.apply {
             clear()
-            add(prepared.get().asFile.absolutePath)
+            add(packaged.get().asFile.absolutePath)
             add(checksums.get().asFile.absolutePath)
         }
         target.tasks.register<DataChecksumsTask>(TASK) {
-            dependsOn(prepare)
+            dependsOn(packageAssets)
             inputDir.set(prepared)
             outputFile.set(checksums.map { it.file(FILE_NAME) })
         }
@@ -109,12 +116,19 @@ class DataChecksumsPlugin : Plugin<Project> {
             val root = inputDir.get().asFile
             // Rebuild from current assets so removals/renames cannot leave stale
             // entries in a checksum map restored from a previous build.
-            val map = sortedMapOf<String, String>()
-            root.walkTopDown().filter { it != root }.forEach { entry ->
-                val path = entry.relativeTo(root).invariantSeparatorsPath
-                map[path] = if (entry.isDirectory) "" else sha256(entry)
-            }
-            serialize(map)
+            serialize(sharedDataChecksums(root))
         }
     }
+}
+
+/** Only Rime shared assets are installed into the shared data directory. */
+internal fun sharedDataChecksums(root: File): Map<String, String> {
+    val shared = root.resolve("shared")
+    require(shared.isDirectory) { "Missing shared Rime assets: $shared" }
+    val map = sortedMapOf<String, String>()
+    shared.walkTopDown().filter { it != shared }.forEach { entry ->
+        val path = entry.relativeTo(root).invariantSeparatorsPath
+        map[path] = if (entry.isDirectory) "" else DataChecksumsPlugin.DataChecksumsTask.sha256(entry)
+    }
+    return map
 }

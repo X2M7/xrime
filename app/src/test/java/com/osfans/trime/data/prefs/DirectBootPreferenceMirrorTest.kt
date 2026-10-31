@@ -31,6 +31,20 @@ class DirectBootPreferenceMirrorTest :
             ).shouldContainExactly(general, keyboard, candidates, clipboard, advanced)
         }
 
+        "remembered full-pinyin schema is mirrored and can be journaled before unlock" {
+            val deviceStore = InMemorySharedPreferences()
+            val credentialStore = InMemorySharedPreferences()
+            val general = AppPrefs.General(deviceStore.preferences)
+            val key = AppPrefs.General.LAST_FULL_PINYIN_SCHEMA
+            val mirror = DirectBootPreferenceMirror({ credentialStore.preferences }, listOf(general))
+            general.lastFullPinyinSchema.setValue("luna_pinyin_simp")
+            mirror.mirroredKeys.contains(key) shouldBe true
+            val journal = DirectBootChangeJournal(deviceStore.preferences, mirror.mirroredKeys)
+            journal.record(key) shouldBe true
+            mirror.syncKeys(journal.changedKeys()) shouldBe true
+            credentialStore.value(key) shouldBe "luna_pinyin_simp"
+        }
+
         "explicit device-protected AppPrefs source journals an allowed change" {
             val deviceStore = InMemorySharedPreferences()
             val appPrefs =

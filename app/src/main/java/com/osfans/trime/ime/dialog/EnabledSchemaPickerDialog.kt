@@ -11,6 +11,11 @@ import androidx.lifecycle.LifecycleCoroutineScope
 import com.osfans.trime.R
 import com.osfans.trime.core.KeyValue
 import com.osfans.trime.core.RimeApi
+import com.osfans.trime.data.prefs.InputLayout
+import com.osfans.trime.data.prefs.InputSetupController
+import com.osfans.trime.data.prefs.InputSetupException
+import com.osfans.trime.data.prefs.InputSetupFailure
+import com.osfans.trime.util.toast
 import kotlinx.coroutines.launch
 import splitties.systemservices.inputMethodManager
 
@@ -21,10 +26,19 @@ object EnabledSchemaPickerDialog {
         context: Context,
         extensions: (AlertDialog.Builder.() -> AlertDialog.Builder)? = null,
     ): AlertDialog {
-        val selecteds = rime.selectedSchemata()
-        val selectedNames = selecteds.map { it.name }
-        val selectedIds = selecteds.map { it.id }
         val selectedSchemaId = rime.selectedSchemaId()
+        val all = rime.selectedSchemata().toList()
+        val hasBothFullPinyin = all.any { it.id == "luna_pinyin" } && all.any { it.id == "luna_pinyin_simp" }
+        val selecteds = if (hasBothFullPinyin) {
+            val keep = if (selectedSchemaId == "luna_pinyin_simp") "luna_pinyin_simp" else "luna_pinyin"
+            all.filter { it.id !in setOf("luna_pinyin", "luna_pinyin_simp") || it.id == keep }
+        } else {
+            all
+        }
+        val selectedNames = selecteds.map {
+            if (it.id == "luna_pinyin" || it.id == "luna_pinyin_simp") context.getString(R.string.quick_settings_full_pinyin) else it.name
+        }
+        val selectedIds = selecteds.map { it.id }
         val selectedIndex = selecteds.indexOfFirst { it.id == selectedSchemaId }
         return AlertDialog
             .Builder(context)
@@ -42,7 +56,22 @@ object EnabledSchemaPickerDialog {
                             if (rime.isEmpty()) {
                                 rime.processKey(KeyValue.fromKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ESCAPE)).value)
                             }
-                            rime.selectSchema(selectedIds[which])
+                            val id = selectedIds[which]
+                            val layout = when (id) {
+                                "luna_pinyin", "luna_pinyin_simp" -> InputLayout.FULL_PINYIN
+                                "luna_pinyin_t9" -> InputLayout.T9
+                                else -> null
+                            }
+                            val selection = if (layout != null) InputSetupController.inspect(rime).selection else null
+                            if (layout != null && selection != null) {
+                                try {
+                                    InputSetupController.apply(rime, selection.copy(layout = layout))
+                                } catch (failure: InputSetupException) {
+                                    context.toast(if (failure.reason == InputSetupFailure.PENDING_INPUT) R.string.quick_settings_pending_input else R.string.quick_settings_apply_failed)
+                                }
+                            } else {
+                                rime.selectSchema(id)
+                            }
                             dialog.dismiss()
                         }
                     }

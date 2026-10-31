@@ -40,7 +40,7 @@ object ThemeYaml {
     private const val MAX_ALIAS_COUNT = 1000u
 
     /** Input limit of the theme reader this replaced. */
-    private const val CODE_POINT_LIMIT = 10 * 1024 * 1024
+    internal const val CODE_POINT_LIMIT = 10 * 1024 * 1024
 
     val parser: KamlYaml = KamlYaml(
         configuration = YamlConfiguration(

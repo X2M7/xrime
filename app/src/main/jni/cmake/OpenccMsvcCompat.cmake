@@ -3,6 +3,14 @@
 # Keep JSON byte lengths checked before narrowing to RapidJSON SizeType.
 # Reject source drift and only adapt the owned OpenCC build-tree copy.
 function(trime_adapt_opencc_msvc source)
+  # The UTF-8 argv helper is only called on non-Windows hosts. Avoid compiling
+  # an unused helper on MinGW while retaining the Windows wide-argv path.
+  file(READ "${source}/tools/CommandLine.cpp" entry)
+  string(REPLACE "\r\n" "\n" entry "${entry}")
+  string(SHA256 actual_entry "${entry}")
+  if(NOT actual_entry STREQUAL "0e25e727dc07a3ddaf6a84b2bf7fc8a3deda7e53b905c26ad01f97e30ca68d89")
+    message(FATAL_ERROR "Re-audit the OpenCC MSVC source SHA: ${source}/tools/CommandLine.cpp")
+  endif()
   file(SHA256 "${source}/tools/CommandLineMain.cpp" actual)
   if(NOT actual STREQUAL "503d497613f559951489d809cf9cf7573c4c4c8809563defdb9af752adaa8cdb")
     message(FATAL_ERROR "Re-audit the OpenCC MSVC source SHA: ${source}/tools/CommandLineMain.cpp")
@@ -11,6 +19,9 @@ function(trime_adapt_opencc_msvc source)
   if(NOT actual STREQUAL "1805525a77e0648c4a2bdaecf063e06b02e358fcfdd49cbdacce8db014bbce74")
     message(FATAL_ERROR "Re-audit the OpenCC MSVC source SHA: ${source}/PrefixMatch.cpp")
   endif()
+  string(REPLACE "namespace {\n\nstd::vector<std::string> ArgsToUtf8" "#if !defined(_WIN32)\nnamespace {\n\nstd::vector<std::string> ArgsToUtf8" entry "${entry}")
+  string(REPLACE "} // namespace\n\n#if defined(_WIN32)" "} // namespace\n#endif\n\n#if defined(_WIN32)" entry "${entry}")
+  file(WRITE "${source}/tools/CommandLine.cpp" "${entry}")
   trime_replace_dependency_cmake("${source}/tools/CommandLineMain.cpp"
     [=[#include <iostream>]=]
     [=[#include <iostream>

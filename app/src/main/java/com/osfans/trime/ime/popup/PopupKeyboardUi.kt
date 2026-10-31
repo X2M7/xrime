@@ -196,13 +196,7 @@ class PopupKeyboardUi(
             if (label.length == 1 && label[0].code < 128) {
                 label
             } else {
-                scope.theme.resolveAction(label).getLabel(keyboard).let {
-                    when {
-                        it.isIconFont -> it
-                        it.isNotEmpty() -> String(Character.toChars(it.codePointAt(0)))
-                        else -> ""
-                    }
-                }
+                scope.theme.resolveAction(label).getLabel(keyboard)
             }
 
         PopupKeyUi(ctx, scope, displayLabel)

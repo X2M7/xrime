@@ -35,7 +35,10 @@ include(ThirdPartyCmake)
 
 option(WITH_GFLAGS "Use gflags" OFF)
 option(WITH_GTEST "Use googletest" OFF)
-option(WITH_UNWIND "Enable libunwind support" OFF)
+# NDK 30 provides libunwind.h but no target libunwind library. With any value
+# other than none, glog's FindUnwind resolves the host x86_64 libunwind.so and
+# fails when linking for other ABIs, so disable its unwind driver entirely.
+set(WITH_UNWIND none CACHE STRING "unwind driver" FORCE)
 add_subdirectory(librime/deps/glog)
 target_compile_options(
   glog_internal PRIVATE "-ffile-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}=.")
@@ -50,7 +53,7 @@ set_property(TARGET yaml-cpp PROPERTY CXX_STANDARD 17)
 option(SNAPPY_BUILD_TESTS "" OFF)
 option(SNAPPY_BUILD_BENCHMARKS "" OFF)
 option(SNAPPY_INSTALL "" OFF)
-trime_add_dependency(snappy snappy 3.1)
+trime_add_dependency(snappy snappy 3.10)
 
 set(HAVE_SNAPPY TRUE)
 option(LEVELDB_BUILD_TESTS "" OFF)
@@ -73,3 +76,7 @@ include_directories("${X11Keysym}")
 include(Rime)
 
 add_subdirectory(librime_jni)
+
+# Standalone, C-only sound-file opener. It remains usable before Rime starts.
+add_library(xrime_sound_file SHARED librime_jni/sound_access/sound_jni_c.c)
+target_compile_options(xrime_sound_file PRIVATE -Wall -Wextra -Werror)

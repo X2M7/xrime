@@ -82,6 +82,40 @@ class RimeMessageBusTest :
             }
         }
 
+        "input marker is ordered separately for each subscriber" {
+            coroutineScope {
+                val bus = RimeMessageBus(8)
+                val release = CompletableDeferred<Unit>()
+                val slowEntered = CompletableDeferred<Unit>()
+                val fastMarker = CompletableDeferred<Unit>()
+                val slowMarker = CompletableDeferred<Unit>()
+                val commit = RimeMessage.CommitTextMessage(CommitProto("before"))
+                val marker = RimeMessage.InputBarrierMessage(RimeMessage.InputBarrierMessage.Data(3, 1)).apply { editorToken = 17 }
+                val fast = launch(Dispatchers.Default, start = CoroutineStart.UNDISPATCHED) {
+                    bus.flow.take(2).collect { if (it === marker) fastMarker.complete(Unit) }
+                }
+                val slow = launch(Dispatchers.Default, start = CoroutineStart.UNDISPATCHED) {
+                    bus.flow.take(2).collect {
+                        if (it === commit) { slowEntered.complete(Unit); release.await() }
+                        if (it === marker) slowMarker.complete(Unit)
+                    }
+                }
+                try {
+                    withContext(Dispatchers.IO) { bus.publish(commit); bus.publish(marker) }
+                    withTimeout(5000) { slowEntered.await(); fastMarker.await() }
+                    slowMarker.isCompleted shouldBe false
+                    release.complete(Unit)
+                    withTimeout(5000) { slowMarker.await(); fast.join(); slow.join() }
+                    marker.editorToken shouldBe 17L
+                    marker.messageType shouldBe RimeMessage.MessageType.Unknown
+                } finally {
+                    release.complete(Unit)
+                    fast.cancelAndJoin()
+                    slow.cancelAndJoin()
+                }
+            }
+        }
+
         "startup without subscribers never blocks or replays old editor output" {
             val bus = RimeMessageBus(1)
             withTimeout(5000) {

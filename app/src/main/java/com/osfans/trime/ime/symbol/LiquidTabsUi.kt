@@ -125,6 +125,8 @@ class LiquidTabsUi(
         recyclerView {
             layoutManager = horizontalLayoutManager()
             adapter = this@LiquidTabsUi.adapter
+            // Keep a tap actionable immediately after dragging past an edge.
+            overScrollMode = android.view.View.OVER_SCROLL_NEVER
             isVerticalScrollBarEnabled = false
             isHorizontalScrollBarEnabled = false
         }

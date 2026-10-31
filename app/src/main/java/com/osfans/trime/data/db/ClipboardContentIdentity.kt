@@ -11,7 +11,7 @@ import java.security.MessageDigest
 
 /** Computes a content identity without retaining any clipboard representation in plaintext. */
 internal object ClipboardContentIdentity {
-    fun sha256OrNull(clip: ClipData): ByteArray? = runCatching { sha256(clip) }.getOrNull()
+    fun sha256OrNull(clip: ClipData): ByteArray? = ClipboardReadSafety.readOrNull { sha256(clip) }
 
     fun sha256(clip: ClipData): ByteArray = MessageDigest.getInstance("SHA-256").run {
         updateField(clip.description.label?.toString())

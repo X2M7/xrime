@@ -76,42 +76,44 @@ abstract class ClipboardAdapter(
         position: Int,
     ) {
         val bean = getItem(position) ?: return
+        val actionAllowed = captureActionGuard()
         with(holder.ui) {
             refreshColors()
             setBean(excerptText(bean.text ?: ""), bean.pinned)
             root.setOnClickListener {
-                onPaste(bean)
+                if (actionAllowed()) onPaste(bean)
             }
             root.setOnLongClickListener {
+                if (!allowItemActions || !actionAllowed()) return@setOnLongClickListener true
                 val popup = PopupMenu(ctx, it)
                 val menu = popup.menu
                 val iconTint = ctx.styledColor(android.R.attr.colorControlNormal)
                 menu.item(R.string.edit, R.drawable.ic_baseline_edit_24, iconTint) {
-                    onEdit(bean.id)
+                    if (actionAllowed()) onEdit(bean.id)
                 }
                 menu.item(R.string.share, R.drawable.ic_baseline_share_24, iconTint) {
-                    onShare(bean)
+                    if (actionAllowed()) onShare(bean)
                 }
                 menu.item(R.string.word_segment, R.drawable.ic_baseline_view_comfy_24, iconTint) {
-                    onSegment(bean)
+                    if (actionAllowed()) onSegment(bean)
                 }
 
                 if (enableCollection) {
                     menu.item(R.string.collect, R.drawable.ic_baseline_star_24, iconTint) {
-                        onCollect(bean)
+                        if (actionAllowed()) onCollect(bean)
                     }
                     if (bean.pinned) {
                         menu.item(R.string.simple_key_unpin, R.drawable.ic_outline_push_pin_24, iconTint) {
-                            onUnpin(bean.id)
+                            if (actionAllowed()) onUnpin(bean.id)
                         }
                     } else {
                         menu.item(R.string.simple_key_pin, R.drawable.ic_baseline_push_pin_24, iconTint) {
-                            onPin(bean.id)
+                            if (actionAllowed()) onPin(bean.id)
                         }
                     }
                 }
                 menu.item(R.string.delete, R.drawable.ic_baseline_delete_24, iconTint) {
-                    onDelete(bean.id)
+                    if (actionAllowed()) onDelete(bean.id)
                 }
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && !DeviceUtils.isSamsungOneUI) {
                     popup.setForceShowIcon(true)
@@ -129,6 +131,9 @@ abstract class ClipboardAdapter(
 
     abstract fun onPaste(bean: DatabaseBean)
 
+    /** Captured per binding so queued actions cannot become valid after reattachment. */
+    open fun captureActionGuard(): () -> Boolean = { true }
+
     open fun onPin(id: Int) {}
 
     open fun onUnpin(id: Int) {}
@@ -142,6 +147,8 @@ abstract class ClipboardAdapter(
     open fun onCollect(bean: DatabaseBean) {}
 
     abstract fun onDelete(id: Int)
+
+    open val allowItemActions: Boolean = true
 
     abstract val enableCollection: Boolean
 

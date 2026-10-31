@@ -2,6 +2,8 @@
 package com.osfans.trime.ime.keyboard
 
 import com.osfans.trime.data.theme.ThemeTestSupport
+import com.osfans.trime.data.theme.model.KeyActionToken
+import com.osfans.trime.data.theme.model.TextKeyboard
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.StringSpec
 import io.kotest.matchers.shouldBe
@@ -9,6 +11,39 @@ import io.kotest.matchers.shouldBe
 class KeyboardConfigResolverTest :
     StringSpec({
         val base = ThemeTestSupport.decodeBuiltinTheme("trime.yaml").presetKeyboards.getValue("default")
+
+        "paired numeric page keeps its keys and positions while adopting the T9 style" {
+            for (themeName in listOf("trime.yaml", "tongwenfeng.trime.yaml")) {
+                val presets = ThemeTestSupport.decodeBuiltinTheme(themeName).presetKeyboards
+                val numeric = presets.getValue("number")
+                val t9 = presets.getValue("luna_pinyin_t9")
+                val paired = pairNumberStyle(numeric, t9)
+                paired.horizontalGap shouldBe t9.horizontalGap
+                paired.verticalGap shouldBe t9.verticalGap
+                paired.keys.map { it.click } shouldBe numeric.keys.map { it.click }
+                paired.keys.map { it.width } shouldBe numeric.keys.map { it.width }
+                paired.keys.first().keyBackColor shouldBe t9.keys.first().keyBackColor
+            }
+        }
+
+        "paired style respects explicit columns and zero-width empty keys" {
+            fun key(color: String) = TextKeyboard.TextKey(click = KeyActionToken.Plain("1"), keyBackColor = color)
+            val source = TextKeyboard(width = 25f, columns = 2, keys = listOf(key("row1"), key("row1"), key("row2")))
+            val number = TextKeyboard(width = 25f, columns = 2, keys = listOf(key("old"), TextKeyboard.TextKey(), key("old"), key("old")))
+            val paired = pairNumberStyle(number, source)
+            paired.keys.last().keyBackColor shouldBe "row2"
+            paired.keys.map { it.click } shouldBe number.keys.map { it.click }
+        }
+
+        "standard full-pinyin Chinese and English layouts share geometry and key actions" {
+            val presets = ThemeTestSupport.decodeBuiltinTheme("trime.yaml").presetKeyboards
+            val chinese = presets.getValue("qwerty")
+            val english = presets.getValue(chinese.asciiKeyboard)
+            english.asciiMode shouldBe 1
+            english.keys shouldBe chinese.keys
+            english.width shouldBe chinese.width
+            english.height shouldBe chinese.height
+        }
 
         "valid import chains and unknown-keyboard fallback retain the complete preset" {
             val presets = mapOf("default" to base, "a" to base.copy(importPreset = "b"), "b" to base.copy(importPreset = "default"))

@@ -44,6 +44,11 @@ internal object GradleVisibleBackport {
                 "com/android/build/gradle/tasks/KaptCreationAction.class" to 1,
             ),
         ),
+        // The audited 9.5.0 raw JAR has no legacy calls; still scan every class.
+        "gradle-9.5.0.jar" to PluginJar(
+            "cc67fb686cbc10a252aca9395df3cef64345b02cf2c12cb9a8f032e8b8953490",
+            emptyMap(),
+        ),
         "symbol-processing-gradle-plugin-2.3.11.jar" to PluginJar(
             "8a00502695b7c44a190c12b9b54d6668724b7aa583f48f9657fab437fbcf8fb9",
             mapOf(

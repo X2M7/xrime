@@ -121,6 +121,10 @@ class BoardWindowManager(override val di: DI) : DIAware {
         currentWindow?.refreshColors()
     }
 
+    fun onInputBoundary() {
+        currentWindow?.onInputBoundary()
+    }
+
     val view: FrameLayout by lazy { context.frameLayout(R.id.input_window) }
 
     fun isAttached(window: BoardWindow) = currentWindow === window

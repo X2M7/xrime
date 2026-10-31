@@ -8,3 +8,5 @@
 
 # Keep the pinned glyph table identical in APKs built on every host.
 app/src/main/res/raw/community_material_glyphs.tsv text eol=lf
+# This source is hashed byte-for-byte in the shipped prediction model manifest.
+script/quality/t11/prediction.tsv text eol=lf

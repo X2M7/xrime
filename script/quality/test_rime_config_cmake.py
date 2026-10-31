@@ -30,8 +30,8 @@ class RimeConfigCmakeTest(unittest.TestCase):
         (self.root / "CMakeLists.txt").write_text(
             'cmake_minimum_required(VERSION 3.18...3.31)\nproject(probe CXX)\n'
             'add_subdirectory(librime/src)\n'
-            f'include("{NATIVE}/cmake/ThirdPartyCmake.cmake")\n'
-            f'include("{NATIVE}/cmake/RimeConfigCompat.cmake")\n'
+            f'include("{NATIVE.as_posix()}/cmake/ThirdPartyCmake.cmake")\n'
+            f'include("{NATIVE.as_posix()}/cmake/RimeConfigCompat.cmake")\n'
             'trime_adapt_rime_config()\n'
             'get_target_property(adapted rime-static SOURCES)\n'
             'file(WRITE "${CMAKE_BINARY_DIR}/sources.txt" "${adapted}")\n')
@@ -65,10 +65,26 @@ class RimeConfigCmakeTest(unittest.TestCase):
         self.assertEqual(deployment.count('return user_config->SaveToFile(deployer->user_data_dir / "user.yaml");'), 1)
         self.assertIn("reference.resource_id, reference.optional", (overlay / FILES[3]).read_text())
         self.assertIn("OptionalReferenceMissing(compiler, reference)", (overlay / FILES[3]).read_text())
+        source = (self.root / "librime/src" / FILES[1]).read_text()
+        adapted = (overlay / FILES[1]).read_text()
+        literal = 'if (str_value.find_first_of("\\r\\n") != string::npos) {\n    *emitter << YAML::Literal;'
+        quoted = literal.replace('YAML::Literal', 'YAML::DoubleQuoted')
+        self.assertEqual(source.count(literal), 1)
+        self.assertEqual(adapted.count(quoted), 1)
+        self.assertNotIn(literal, adapted)
 
     def test_upstream_drift_is_not_silently_ignored(self):
         target = self.root / "librime/src" / FILES[-1]
         target.write_text(target.read_text().replace("ConfigNeedsUpdate(config.get())", "ConfigNeedsUpdate(nullptr)"))
+        result = self.configure()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Re-audit", result.stderr)
+
+    def test_multiline_emitter_drift_is_rejected(self):
+        target = self.root / "librime/src" / FILES[1]
+        original = target.read_text()
+        self.assertIn('*emitter << YAML::Literal;', original)
+        target.write_text(original.replace('*emitter << YAML::Literal;', '*emitter << YAML::SingleQuoted;'))
         result = self.configure()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Re-audit", result.stderr)

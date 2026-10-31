@@ -10,6 +10,7 @@ import android.os.Build
 import android.text.TextPaint
 import android.util.TypedValue
 import android.view.ContextThemeWrapper
+import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowInsets
@@ -17,6 +18,8 @@ import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InlineSuggestionsResponse
 import android.widget.FrameLayout
 import android.widget.ImageView
+import android.widget.LinearLayout
+import android.widget.TextView
 import android.widget.ScrollView
 import androidx.annotation.RequiresApi
 import androidx.core.content.ContextCompat
@@ -42,9 +45,12 @@ import com.osfans.trime.ime.candidates.compact.CompactCandidateDelegate
 import com.osfans.trime.ime.candidates.popup.PopupCandidatesMode
 import com.osfans.trime.ime.composition.PreeditDelegate
 import com.osfans.trime.ime.composition.T9DisambiguationView
+import com.osfans.trime.ime.clipboard.ClipboardSearchResults
+import com.osfans.trime.ime.clipboard.ClipboardWindow
 import com.osfans.trime.ime.keyboard.CommonKeyboardActionListener
 import com.osfans.trime.ime.keyboard.KeyboardPrefs.isLandscapeMode
 import com.osfans.trime.ime.keyboard.KeyboardWindow
+import com.osfans.trime.ime.keyboard.ClipboardSearchKeyboardSnapshot
 import com.osfans.trime.ime.keyboard.T9LayoutPolicy
 import com.osfans.trime.ime.performance.InputLatencyLog
 import com.osfans.trime.ime.popup.PopupDelegate
@@ -97,6 +103,96 @@ class InputView(
             importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
         }
     private val placeholderListener = OnClickListener { }
+
+    private var clipboardResultsWindow: ClipboardWindow? = null
+    private var clipboardResultsData: ClipboardSearchResults? = null
+
+    private val searchQueryView = TextView(themedContext).apply {
+        isSingleLine = true
+        ellipsize = android.text.TextUtils.TruncateAt.END
+        textSize = 14f
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(dp(8), 0, dp(8), 0)
+        setHint(R.string.clipboard_search_hint)
+    }
+    private val searchResultsView = TextView(themedContext).apply {
+        gravity = Gravity.CENTER
+        textSize = 14f
+        setPadding(dp(8), 0, dp(8), 0)
+        setText(R.string.clipboard_search_results)
+        isClickable = true
+    }
+    private val searchCancelView = TextView(themedContext).apply {
+        gravity = Gravity.CENTER
+        textSize = 14f
+        setPadding(dp(8), 0, dp(8), 0)
+        setText(R.string.clipboard_search_cancel)
+        isClickable = true
+    }
+    private val searchControls = LinearLayout(themedContext).apply {
+        orientation = LinearLayout.HORIZONTAL
+        visibility = View.GONE
+        addView(searchQueryView, LinearLayout.LayoutParams(0, dp(40), 1f))
+        addView(searchResultsView, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(40)))
+        addView(searchCancelView, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(40)))
+    }
+
+    internal fun showClipboardSearch(onResults: () -> Unit, onCancel: () -> Unit) {
+        windowManager.attachWindow(KeyboardWindow)
+        searchResultsView.setOnClickListener { onResults() }
+        searchCancelView.setOnClickListener { onCancel() }
+        searchControls.visibility = View.VISIBLE
+        refreshClipboardSearchColors()
+        updateKeyboardSize()
+    }
+
+    internal fun updateClipboardSearchQuery(query: String) { searchQueryView.text = query }
+
+    internal fun captureClipboardSearchKeyboard(): ClipboardSearchKeyboardSnapshot = keyboardWindow.captureClipboardSearchKeyboard()
+    internal fun useClipboardSearchLanguage(ascii: Boolean) { keyboardWindow.switchSearchLanguage(ascii) }
+    internal fun restoreClipboardSearchKeyboard(snapshot: ClipboardSearchKeyboardSnapshot) { keyboardWindow.restoreClipboardSearchKeyboard(snapshot) }
+
+    internal fun showClipboardSearchResults(results: ClipboardSearchResults) {
+        hideClipboardSearch()
+        val window = ClipboardWindow(di, results)
+        clipboardResultsWindow = window
+        clipboardResultsData = results
+        windowManager.attachWindow(window)
+    }
+
+    internal fun showClipboardHistory() {
+        windowManager.attachWindow(ClipboardWindow(di))
+    }
+
+    internal fun forgetClipboardSearchResults(results: ClipboardSearchResults) {
+        if (clipboardResultsData === results) {
+            clipboardResultsData = null
+            clipboardResultsWindow = null
+        }
+    }
+
+    internal fun dismissClipboardSearchResults() {
+        val window = clipboardResultsWindow
+        clipboardResultsWindow = null
+        clipboardResultsData = null
+        if (window != null && windowManager.isAttached(window)) windowManager.attachWindow(KeyboardWindow)
+    }
+
+    internal fun hideClipboardSearch() {
+        searchControls.visibility = View.GONE
+        searchQueryView.text = ""
+        searchResultsView.setOnClickListener(null)
+        searchCancelView.setOnClickListener(null)
+        updateKeyboardSize()
+    }
+
+    private fun refreshClipboardSearchColors() {
+        searchControls.setBackgroundColor(scope.colors.keyboardBackColor)
+        searchQueryView.setTextColor(scope.colors.keyTextColor)
+        searchQueryView.setHintTextColor(scope.colors.keyTextColor)
+        searchResultsView.setTextColor(scope.colors.keyTextColor)
+        searchCancelView.setTextColor(scope.colors.keyTextColor)
+    }
 
     private val leftPaddingSpace =
         view(::View) {
@@ -215,6 +311,7 @@ class InputView(
         preedit.refreshColors()
         t9.refreshColors()
         windowManager.refreshColors()
+        refreshClipboardSearchColors()
     }
 
     init {
@@ -246,9 +343,16 @@ class InputView(
                     },
                 )
                 add(
-                    t9,
+                    searchControls,
                     lParams(matchParent, wrapContent) {
                         below(inputBar.view)
+                        centerHorizontally()
+                    },
+                )
+                add(
+                    t9,
+                    lParams(matchParent, wrapContent) {
+                        below(searchControls)
                         centerHorizontally()
                     },
                 )
@@ -380,6 +484,15 @@ class InputView(
         )
     }
 
+    override fun onInterceptTouchEvent(event: MotionEvent): Boolean =
+        service.isSearchInputFrozen || super.onInterceptTouchEvent(event)
+
+    // This container has no click action: while search input is frozen it only
+    // consumes gestures so that child keys cannot reach the editor.
+    @SuppressLint("ClickableViewAccessibility")
+    override fun onTouchEvent(event: MotionEvent): Boolean =
+        service.isSearchInputFrozen || super.onTouchEvent(event)
+
     private fun scheduleKeyboardSizeUpdate() {
         if (sizeUpdatePending) return
         sizeUpdatePending = true
@@ -403,14 +516,14 @@ class InputView(
         val sidePadding = keyboardSidePaddingPx
         val safe = horizontalSafeInsets()
         val density = resources.displayMetrics.density
-        val availableHeight = if (Build.VERSION.SDK_INT >= 30) {
+        val availableHeight = (if (Build.VERSION.SDK_INT >= 30) {
             val metrics = context.systemWindowManager.currentWindowMetrics
             val bars = metrics.windowInsets.getInsetsIgnoringVisibility(android.view.WindowInsets.Type.systemBars() or android.view.WindowInsets.Type.displayCutout())
             metrics.bounds.height() - bars.top - maxOf(bars.bottom, windowNavBottom)
         } else {
             // screenHeightDp already excludes the legacy system-bar area.
             dp(resources.configuration.screenHeightDp) - (windowNavBottom - windowSystemBottom).coerceAtLeast(0)
-        }
+        } - if (searchControls.isVisible) dp(40) else 0).coerceAtLeast(1)
         val width = ((keyboardView.width.takeIf { it > 0 } ?: resources.displayMetrics.widthPixels) - safe.left - safe.right).coerceAtLeast(1)
         val hand = AppPrefs.defaultInstance().keyboard.t9OneHand.getValue()
         val sizes = if (compositionPanel) {
@@ -525,6 +638,7 @@ class InputView(
     }
 
     fun finishInput() {
+        windowManager.onInputBoundary()
         dismissCandidateActionMenu()
         keyboardWindow.finishInput()
         popup.dismissAll()
@@ -534,6 +648,7 @@ class InputView(
 
     /** Drop content-bearing surfaces at an editor/privacy boundary. */
     fun clearEditorBoundaryState(privateInput: Boolean) {
+        windowManager.onInputBoundary()
         inputBar.clearEditorBoundaryState()
         keyboardWindow.clearEditorBoundaryState()
         preedit.clearEditorBoundaryState()

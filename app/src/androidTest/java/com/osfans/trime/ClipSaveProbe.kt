@@ -3,23 +3,31 @@ package com.osfans.trime
 
 import android.app.Activity
 import android.app.Instrumentation
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
 import android.view.View
 import android.widget.EditText
 import androidx.room.withTransaction
 import com.osfans.trime.data.db.ClipboardHelper
+import com.osfans.trime.data.db.ClipboardSuggestionState
 import com.osfans.trime.data.db.CollectionHelper
 import com.osfans.trime.data.db.Database
 import com.osfans.trime.data.db.DatabaseBean
 import com.osfans.trime.data.db.DatabaseDao
+import com.osfans.trime.data.prefs.AppPrefs
+import com.osfans.trime.ime.core.PrivacyModeState
 import com.osfans.trime.ui.main.ClipEditActivity
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -29,6 +37,7 @@ import timber.log.Timber
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 
 /** Real Room writes and dialog lifecycle; only newly inserted UUID-tagged rows are removed. */
 internal object ClipSaveProbe {
@@ -58,8 +67,13 @@ internal object ClipSaveProbe {
                 .putExtra(ClipEditActivity.CLIP_TYPE, type)
                 .putExtra(ClipEditActivity.BEAN_ID, id),
         ) as ClipEditActivity
-        suspend fun eventually(block: suspend () -> Boolean) = withTimeout(15_000) {
-            while (!block()) delay(50)
+        suspend fun eventually(label: String = "unspecified", diagnostic: suspend () -> String = { "" }, block: suspend () -> Boolean) {
+            try {
+                withTimeout(15_000) { while (!block()) delay(50) }
+            } catch (failure: TimeoutCancellationException) {
+                val state = kotlinx.coroutines.withTimeoutOrNull(2_000) { diagnostic() } ?: "diagnostic timed out"
+                throw IllegalStateException("Timed out during $label: $state", failure)
+            }
         }
         fun checkPassed(name: String) {
             checks++
@@ -73,8 +87,26 @@ internal object ClipSaveProbe {
                     putString("selected_input_method", Settings.Secure.getString(instrumentation.targetContext.contentResolver, Settings.Secure.DEFAULT_INPUT_METHOD))
                 },
             )
+            ClipboardSearchProbe.verifyConnection(instrumentation)
+            checkPassed("clipboard search connection is local and cleans up")
+            val clipboard = main { instrumentation.targetContext.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager }
+            val previousClip = main { clipboard.primaryClip?.let(::ClipData) }
+            check(previousClip != null || Build.VERSION.SDK_INT >= 28) { "A pre-existing clipboard is required for a reversible API 21 test" }
+            val listening = AppPrefs.defaultInstance().clipboard.clipboardListening
+            val previousListening = listening.getValue()
+            val ownClipboard = mutableSetOf<String>()
+            val suggestion = AtomicReference<ClipboardSuggestionState.Update<DatabaseBean>?>(null)
+            val published = AtomicReference<ClipboardSuggestionState.Update<DatabaseBean>?>(null)
+            val listener = ClipboardHelper.OnClipboardUpdateListener { update ->
+                suggestion.set(update)
+                if (update.bean != null) published.set(update)
+            }
+            main { listening.setValue(true); ClipboardHelper.addOnUpdateListener(listener) }
+            try {
             runBlocking {
                 withTimeout(180_000) {
+                    ClipboardSearchProbe.verify(instrumentation.targetContext)
+                    checkPassed("clipboard literal search, ordering and empty results")
                     for ((type, helper, prefix) in listOf(
                         Triple(ClipEditActivity.FROM_CLIPBOARD, ClipboardHelper, "clb"),
                         Triple(ClipEditActivity.FROM_COLLECTION, CollectionHelper, "clt"),
@@ -84,11 +116,71 @@ internal object ClipSaveProbe {
                         val dao = daoField.get(helper) as DatabaseDao
                         val cached = helper.javaClass.getDeclaredField("lastBean").apply { isAccessible = true }
                         val previousCache = main { cached.get(helper) }
+                        val isClipboard = type == ClipEditActivity.FROM_CLIPBOARD
                         val owned = mutableListOf<Int>()
                         var active: ClipEditActivity? = null
                         suspend fun insert(text: String): DatabaseBean {
                             val row = dao.insert(DatabaseBean(text = text, pinned = true))
                             return checkNotNull(dao.get(row)).also { owned += it.id }
+                        }
+                        suspend fun seedSuggestion(bean: DatabaseBean): ClipboardSuggestionState.Update<DatabaseBean>? {
+                            if (!isClipboard) {
+                                val text = checkNotNull(bean.text)
+                                var observed: Long? = null
+                                var sent: Long? = null
+                                var stableSince = SystemClock.elapsedRealtime()
+                                eventually("real collection cache") {
+                                    val epoch = PrivacyModeState.observeOrdinaryPersistence()
+                                    if (epoch != observed) {
+                                        observed = epoch
+                                        stableSince = SystemClock.elapsedRealtime()
+                                    }
+                                    if (epoch != null && epoch != sent && SystemClock.elapsedRealtime() - stableSince >= 300) {
+                                        sent = epoch
+                                        CollectionHelper.addNewBean(text)
+                                    }
+                                    val value = cached.get(helper) as? DatabaseBean
+                                    epoch != null && sent == epoch && PrivacyModeState.isOrdinaryEpoch(epoch) &&
+                                        value?.let { it.id == bean.id && it.text == text } == true
+                                }
+                                return null
+                            }
+                            val text = checkNotNull(bean.text)
+                            ownClipboard.add(text)
+                            suggestion.set(null)
+                            published.set(null)
+                            val initialEpoch = PrivacyModeState.observeOrdinaryPersistence()
+                            var observedEpoch: Long? = null
+                            var sentEpoch: Long? = null
+                            var stableSince = SystemClock.elapsedRealtime()
+                            eventually("real clipboard suggestion", {
+                                val update = suggestion.get()
+                                val found = dao.find(text)
+                                val registered = ClipboardHelper::class.java.getDeclaredField("listenerRegistered")
+                                    .apply { isAccessible = true }.getBoolean(ClipboardHelper)
+                                "rowMatches=${found?.id == bean.id}, updatePresent=${update != null}, " +
+                                    "updateMatches=${update?.bean?.let { it.id == bean.id && it.text == text } == true}, " +
+                                    "current=${update?.let(ClipboardHelper::isCurrentSuggestion)}, " +
+                                    "updateEpoch=${update?.privacyEpoch}, initialEpoch=$initialEpoch, " +
+                                    "currentEpoch=${PrivacyModeState.observeOrdinaryPersistence()}, private=${PrivacyModeState.active}, " +
+                                    "listening=${listening.getValue()}, registered=$registered, " +
+                                    "clipboardMatches=${main { clipboard.primaryClip?.getItemAt(0)?.text?.toString() == text }}"
+                            }) {
+                                val epoch = PrivacyModeState.observeOrdinaryPersistence()
+                                if (epoch != observedEpoch) {
+                                    observedEpoch = epoch
+                                    stableSince = SystemClock.elapsedRealtime()
+                                }
+                                if (epoch != null && epoch != sentEpoch && SystemClock.elapsedRealtime() - stableSince >= 300) {
+                                    sentEpoch = epoch
+                                    main { clipboard.setPrimaryClip(ClipData.newPlainText("xrime clip save probe", text)) }
+                                }
+                                val update = suggestion.get()
+                                update != null && update.bean?.let { it.id == bean.id && it.text == bean.text } == true &&
+                                    update.privacyEpoch?.let(PrivacyModeState::isOrdinaryEpoch) == true &&
+                                    ClipboardHelper.isCurrentSuggestion(update)
+                            }
+                            return checkNotNull(suggestion.get())
                         }
                         try {
                             suspend fun verifySuccessfulSaves() {
@@ -96,11 +188,27 @@ internal object ClipSaveProbe {
                                     val token = UUID.randomUUID().toString()
                                     val bean = insert("initial-$token")
                                     val expected = "saved-$token-\u4f60\u597d-\uD842\uDFB7"
-                                    main { cached.set(helper, bean) }
                                     val activity = editor(type, bean.id).also { active = it }
                                     val field = main { activity.findViewById<EditText>(R.id.clip_edit_text) }
                                     val ok = main { activity.findViewById<View>(R.id.clip_edit_ok) }
-                                    eventually { main { field.text.toString() == bean.text && ok.isEnabled } }
+                                    val beforeEpoch = PrivacyModeState.observeOrdinaryPersistence()
+                                    suspend fun state(): String {
+                                        val rowSaved = dao.get(bean.id)?.text == expected
+                                        val ui = main {
+                                            val cache = cached.get(helper) as? DatabaseBean
+                                            "fieldLoaded=${field.text.toString() == bean.text}, okEnabled=${ok.isEnabled}, " +
+                                                "cacheMatches=${cache?.text == expected}, finishing=${activity.isFinishing}, destroyed=${activity.isDestroyed}"
+                                        }
+                                        val listening = AppPrefs.defaultInstance().clipboard.clipboardListening.getValue()
+                                        val registered = if (type == ClipEditActivity.FROM_CLIPBOARD) {
+                                            ClipboardHelper::class.java.getDeclaredField("listenerRegistered").apply { isAccessible = true }.getBoolean(ClipboardHelper)
+                                        } else null
+                                        return "type=$type, rowSaved=$rowSaved, $ui, listening=$listening, registered=$registered, " +
+                                            "privacyActive=${PrivacyModeState.active}, initialEpoch=$beforeEpoch, currentEpoch=${PrivacyModeState.observeOrdinaryPersistence()}"
+                                    }
+                                    eventually("$type initial load", ::state) { main { field.text.toString() == bean.text && ok.isEnabled } }
+                                    val initialSuggestion = seedSuggestion(bean)
+                                    val collectionEpoch = if (isClipboard) null else checkNotNull(PrivacyModeState.observeOrdinaryPersistence())
                                     val entered = CompletableDeferred<Unit>()
                                     val release = CompletableDeferred<Unit>()
                                     val blocked = launch(Dispatchers.Default) {
@@ -132,9 +240,25 @@ internal object ClipSaveProbe {
                                             db.withTransaction { }
                                         }
                                     }
-                                    eventually { dao.get(bean.id)?.text == expected }
-                                    eventually { main { (cached.get(helper) as DatabaseBean).text == expected } }
-                                    eventually { main { activity.isDestroyed } }
+                                    eventually("$type database save", ::state) { dao.get(bean.id)?.text == expected }
+                                    if (isClipboard) {
+                                        eventually("$type current suggestion or editor boundary", ::state) {
+                                            published.get()?.bean?.let { it.id == bean.id && it.text == expected } == true ||
+                                                initialSuggestion?.privacyEpoch?.let(PrivacyModeState::isOrdinaryEpoch) != true
+                                        }
+                                        val accepted = published.get()
+                                        if (accepted?.bean?.text != expected) {
+                                            check(initialSuggestion?.privacyEpoch?.let(PrivacyModeState::isOrdinaryEpoch) != true) {
+                                                "An unchanged ordinary suggestion was not refreshed"
+                                            }
+                                        }
+                                    } else {
+                                        eventually("$type cache refresh or editor boundary", ::state) {
+                                            main { (cached.get(helper) as? DatabaseBean)?.text == expected } ||
+                                                !PrivacyModeState.isOrdinaryEpoch(checkNotNull(collectionEpoch))
+                                        }
+                                    }
+                                    eventually("$type activity destruction", ::state) { main { activity.isDestroyed } }
                                     checkPassed("$type: ${if (background) "save survives dialog destruction" else "save awaits commit and ignores duplicate click"}")
                                     active = null
                                 }
@@ -143,11 +267,11 @@ internal object ClipSaveProbe {
 
                             suspend fun verifyRemovedRowFailure() {
                                 val missing = insert("missing-${UUID.randomUUID()}")
-                                main { cached.set(helper, missing) }
                                 val failed = editor(type, missing.id).also { active = it }
                                 val field = main { failed.findViewById<EditText>(R.id.clip_edit_text) }
                                 val ok = main { failed.findViewById<View>(R.id.clip_edit_ok) }
                                 eventually { main { field.text.toString() == missing.text && ok.isEnabled } }
+                                seedSuggestion(missing)
                                 dao.delete(missing.id)
                                 main {
                                     field.setText("unsaved edit")
@@ -156,7 +280,13 @@ internal object ClipSaveProbe {
                                 eventually { main { ok.isEnabled && !failed.isFinishing } }
                                 check(main { field.text.toString() == "unsaved edit" })
                                 check(main { field.error?.toString() == failed.getString(R.string.clipboard_entry_removed) })
-                                check(main { cached.get(helper) == missing }) { "Failed write changed the cache" }
+                                if (isClipboard) {
+                                    check(published.get()?.bean?.text != "unsaved edit") { "Failed write published the draft" }
+                                } else {
+                                    check(main { (cached.get(helper) as? DatabaseBean)?.let { it.id == missing.id && it.text == missing.text } == true }) {
+                                        "Failed write changed the cache"
+                                    }
+                                }
                                 check(dao.get(missing.id) == null)
                                 main { failed.findViewById<View>(R.id.clip_edit_cancel).performClick() }
                                 eventually { main { failed.isDestroyed } }
@@ -167,11 +297,11 @@ internal object ClipSaveProbe {
 
                             suspend fun verifyRemovedBetweenReadAndUpdate() {
                                 val missing = insert("update-race-${UUID.randomUUID()}")
-                                main { cached.set(helper, missing) }
                                 val activity = editor(type, missing.id).also { active = it }
                                 val field = main { activity.findViewById<EditText>(R.id.clip_edit_text) }
                                 val ok = main { activity.findViewById<View>(R.id.clip_edit_ok) }
                                 eventually { main { field.text.toString() == missing.text && ok.isEnabled } }
+                                seedSuggestion(missing)
                                 val readExisting = AtomicBoolean()
                                 val affectedRows = AtomicInteger(-1)
                                 daoField.set(
@@ -201,7 +331,13 @@ internal object ClipSaveProbe {
                                     check(readExisting.get() && affectedRows.get() == 0) { "The real DAO did not return zero rows after a successful read" }
                                     check(main { field.text.toString() == "unsaved raced edit" })
                                     check(main { field.error?.toString() == activity.getString(R.string.clipboard_entry_removed) })
-                                    check(main { cached.get(helper) == missing }) { "A zero-row update published edited text into the cache" }
+                                    if (isClipboard) {
+                                        check(published.get()?.bean?.text != "unsaved raced edit") { "A zero-row update published the draft" }
+                                    } else {
+                                        check(main { (cached.get(helper) as? DatabaseBean)?.let { it.id == missing.id && it.text == missing.text } == true }) {
+                                            "A zero-row update published edited text into the cache"
+                                        }
+                                    }
                                     check(dao.get(missing.id) == null)
                                     main { activity.findViewById<View>(R.id.clip_edit_cancel).performClick() }
                                     eventually { main { activity.isDestroyed } }
@@ -264,7 +400,6 @@ internal object ClipSaveProbe {
                             suspend fun verifySupersededMissingLoad() {
                                 val first = insert("stale-missing-${UUID.randomUUID()}")
                                 val second = insert("current-${UUID.randomUUID()}")
-                                main { cached.set(helper, second) }
                                 val reading = CompletableDeferred<Unit>()
                                 val releaseRead = CompletableDeferred<Unit>()
                                 val readReturned = CompletableDeferred<Unit>()
@@ -300,12 +435,18 @@ internal object ClipSaveProbe {
                                     val field = main { activity.findViewById<EditText>(R.id.clip_edit_text) }
                                     val ok = main { activity.findViewById<View>(R.id.clip_edit_ok) }
                                     eventually { main { field.text.toString() == second.text && ok.isEnabled } }
+                                    seedSuggestion(second)
                                     main { field.setText("current draft must survive stale NotFound") }
                                     releaseRead.complete(Unit)
                                     readReturned.await()
                                     delay(200)
                                     check(main { !activity.isFinishing && ok.isEnabled && field.text.toString() == "current draft must survive stale NotFound" })
-                                    check(main { field.error == null && cached.get(helper) == second })
+                                    check(main {
+                                        val cache = cached.get(helper) as? DatabaseBean
+                                        field.error == null && if (isClipboard) {
+                                            cache == null || (cache.id == second.id && cache.text == second.text)
+                                        } else cache?.let { it.id == second.id && it.text == second.text } == true
+                                    })
                                     check(dao.get(first.id) == null && dao.get(second.id)?.text == second.text)
                                     main {
                                         instrumentation.callActivityOnNewIntent(
@@ -316,7 +457,11 @@ internal object ClipSaveProbe {
                                     }
                                     eventually { main { activity.isDestroyed } }
                                     active = null
-                                    check(main { cached.get(helper) == second })
+                                    check(main {
+                                        val cache = cached.get(helper) as? DatabaseBean
+                                        if (isClipboard) cache == null || (cache.id == second.id && cache.text == second.text)
+                                        else cache?.let { it.id == second.id && it.text == second.text } == true
+                                    })
                                     checkPassed("$type: stale missing read cannot close the new draft, while a current missing read exits normally")
                                 } finally {
                                     releaseRead.complete(Unit)
@@ -332,10 +477,22 @@ internal object ClipSaveProbe {
                                 }
                                 daoField.set(helper, dao)
                                 owned.forEach { dao.delete(it) }
-                                main { cached.set(helper, previousCache) }
+                                if (!isClipboard) main { cached.set(helper, previousCache) }
                             }
                         }
                     }
+                }
+            }
+            } finally {
+                main {
+                    ClipboardHelper.removeOnUpdateListener(listener)
+                    listening.setValue(false)
+                    val current = clipboard.primaryClip?.getItemAt(0)?.text?.toString()
+                    if (current != null && current in ownClipboard) {
+                        if (previousClip != null) clipboard.setPrimaryClip(previousClip)
+                        else if (Build.VERSION.SDK_INT >= 28) clipboard.clearPrimaryClip()
+                    }
+                    listening.setValue(previousListening)
                 }
             }
             check(editErrors.get() == 0) { "A normal clipboard edit outcome emitted an error log" }

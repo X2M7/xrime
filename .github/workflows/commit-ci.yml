@@ -13,8 +13,13 @@ permissions:
 env:
   CI_NAME: Commit CI
 jobs:
+  check:
+    if: ${{ github.repository == 'X2M7/trime' }}
+    uses: ./.github/workflows/check-ci.yml
+
   build:
     if: ${{ github.repository == 'X2M7/trime' }}
+    needs: check
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false

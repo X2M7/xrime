@@ -251,6 +251,11 @@ class Rime :
         }
     }
 
+    override suspend fun publishInputBarrier(epoch: Long, sequence: Long) = withRimeContext {
+        require(epoch > 0 && sequence > 0)
+        dispatchRimeMessage(RimeMessage.InputBarrierMessage(RimeMessage.InputBarrierMessage.Data(epoch, sequence)))
+    }
+
     override suspend fun isEmpty(): Boolean = withRimeContext {
         getCurrentRimeSchema() == ".default" // 無方案
     }
@@ -483,7 +488,7 @@ class Rime :
         val file = File(DataManager.resolveDeployedResourcePath(themeId))
         check(file.isFile && file.length() in 1..2L * 1024 * 1024) { "Selected theme artifact is unavailable or too large" }
         ConfigImportValidator.validate(file, "$themeId.yaml")
-        val mapping = ThemeYaml.parser.parseToYamlNode(file.readText()).mapping
+        val mapping = ThemeYaml.parser.parseToYamlNode(ConfigImportValidator.readConfigurationText(file, "$themeId.yaml")).mapping
             ?: error("Selected theme artifact is not a mapping")
         return when (val result = ThemeLoader.decodeAndReport(themeId, mapping)) {
             is ThemeLoader.ThemeLoadResult.Failure -> throw result.error
@@ -633,6 +638,15 @@ class Rime :
         }.also { Timber.d("simulateKeySequence ${if (it) "success" else "failed"}") }
     }
 
+    override suspend fun emitLiteralMacroText(text: String) = withRimeContext {
+        invalidateCandidates()
+        clearRimePredictionContext()
+        // Do not replace a native commit that may already be present in the response.
+        // Both messages share the native FIFO and its editor/admission identity.
+        emitResponse()
+        publishSnapshotMessage(4, arrayOf(CommitProto(text)), candidateSnapshotCached)
+    }
+
     override suspend fun selectCandidate(idx: Int, global: Boolean, expectedSnapshot: CandidateSnapshot?): Boolean = withRimeContext {
         if (idx < 0) return@withRimeContext false
         // Theme key bindings without a row identity must never select a next-word suggestion.
@@ -727,9 +741,15 @@ class Rime :
     }
 
     override suspend fun moveCursorPos(position: Int, expectedPreedit: String?) = withRimeContext {
-        if (expectedPreedit != null && getRimeContext().composition.preedit != expectedPreedit) return@withRimeContext
+        val preedit = getRimeContext().composition.preedit
+        if (expectedPreedit != null && preedit != expectedPreedit) return@withRimeContext
+        val rawPosition = if (t9Cached.enabled || preedit == null) {
+            position
+        } else {
+            preeditCaretToRawOffset(preedit, getRimeRawInput(), position) ?: position
+        }
         invalidateCandidates()
-        setRimeCaretPos(position)
+        setRimeCaretPos(rawPosition)
         emitResponse()
     }
 
@@ -1069,7 +1089,7 @@ class Rime :
             messageBus.publish(
                 RimeMessage.SchemaMessage(
                     SchemaItem(schemaId, schemaName),
-                ),
+                ).apply { inputAdmission = RimeInputAdmissionContext.current.get() ?: 0L },
             )
         }
     }
@@ -1347,6 +1367,7 @@ class Rime :
 
         private fun dispatchRimeMessage(message: RimeMessage<*>) {
             message.editorToken = editorToken
+            message.inputAdmission = RimeInputAdmissionContext.current.get() ?: 0L
             if (message is RimeMessage.DeployMessage) message.isConfigurationImport = configurationImportInProgress
             Timber.d("Handling ${message.javaClass.simpleName}")
             messageBus.publish(message) {

@@ -30,7 +30,9 @@ object SchemaPickerRegression {
             rime.clearComposition()
             check(rime.selectSchema("luna_pinyin"))
             val choices = rime.selectedSchemata()
-            val target = choices.indexOfFirst { it.id == "luna_pinyin_t9" }
+            check(choices.any { it.id == "luna_pinyin" } && choices.any { it.id == "luna_pinyin_simp" })
+            val visibleChoices = choices.filter { it.id != "luna_pinyin_simp" }
+            val target = visibleChoices.indexOfFirst { it.id == "luna_pinyin_t9" }
             check(target >= 0)
             check(rime.processKey(KeyValue.fromKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_F4)).value))
             check(rime.isEmpty()) { "F4 must expose the temporary .default schema for this regression" }
@@ -40,15 +42,18 @@ object SchemaPickerRegression {
                     dialog.create()
                     val list = checkNotNull(dialog.listView)
                     val adapter = checkNotNull(list.adapter)
-                    check(adapter.count == choices.size) { "F4 hid the enabled schema list" }
-                    choices.forEachIndexed { index, item -> check(adapter.getItem(index).toString() == item.name) }
+                    check(adapter.count == visibleChoices.size) { "F4 did not consolidate the built-in full-pinyin schemas" }
+                    visibleChoices.forEachIndexed { index, item ->
+                        val expected = if (item.id == "luna_pinyin") context.getString(R.string.quick_settings_full_pinyin) else item.name
+                        check(adapter.getItem(index).toString() == expected)
+                    }
                     check(list.performItemClick(adapter.getView(target, null, list), target, adapter.getItemId(target)))
                 } finally {
                     dialog.dismiss()
                 }
             }
             withTimeout(30_000) {
-                while (rime.selectedSchemaId() != choices[target].id) delay(50)
+                while (rime.selectedSchemaId() != visibleChoices[target].id) delay(50)
             }
             withContext(Dispatchers.Main) {
                 val empty = object : RimeApi by rime {

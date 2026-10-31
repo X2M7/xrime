@@ -81,14 +81,42 @@ object UserDictManager {
         }
     }
 
-    fun exportUserDict(dest: OutputStream, dictName: String, textFile: String): Result<Int> = result {
+    /** The caller owns a private staging path and exports it only after Rime is released. */
+    internal fun exportUserDictToFile(destination: File, dictName: String, textFile: String): Result<Int> = result {
         val name = requireDictionaryName(dictName)
-        staged(".txt") { temporary ->
-            val count = exportUserDict(name, temporary.absolutePath)
-            if (count < 0 || !temporary.isFile || DictionaryTextFormats.validateTable(temporary) != count) {
-                throw IOException("Rime could not export the dictionary to $textFile")
+        val count = exportUserDict(name, destination.absolutePath)
+        if (count < 0 || !destination.isFile) throw IOException("Rime could not export the dictionary to $textFile")
+        // The librime API accepts only a path, so this check occurs after native generation.
+        if (destination.length() > DictionaryDocumentStager.MAX_EXPORT_BYTES) {
+            throw DictionarySizeLimitException("Dictionary export exceeds the 256 MiB limit")
+        }
+        val header = "# Rime user dictionary export\n".toByteArray(Charsets.UTF_8)
+        val actualHeader = ByteArray(header.size)
+        val headerRead = destination.inputStream().use { input ->
+            var total = 0
+            while (total < actualHeader.size) {
+                val read = input.read(actualHeader, total, actualHeader.size - total)
+                if (read <= 0) break
+                total += read
             }
-            temporary.inputStream().use { it.copyTo(dest) }
+            total
+        }
+        if (headerRead != header.size || !actualHeader.contentEquals(header)) {
+            throw IOException("Rime produced an incomplete dictionary export")
+        }
+        if (DictionaryTextFormats.validateTable(destination) != count) {
+            throw IOException("Rime could not export the dictionary to $textFile")
+        }
+        count
+    }
+
+    /** Compatibility helper for app-owned outputs; external documents use DictionaryDocumentStager. */
+    fun exportUserDict(dest: OutputStream, dictName: String, textFile: String): Result<Int> = result {
+        staged(".txt") { temporary ->
+            val count = exportUserDictToFile(temporary, dictName, textFile).getOrThrow()
+            temporary.inputStream().use { input ->
+                DictionaryTextFormats.copyBounded(input, dest, DictionaryDocumentStager.MAX_EXPORT_BYTES) {}
+            }
             count
         }
     }

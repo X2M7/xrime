@@ -3,6 +3,55 @@ package com.osfans.trime.ime.keyboard
 
 import com.osfans.trime.data.theme.model.TextKeyboard
 
+/** Keep numeric actions and positions while borrowing the originating T9 key style. */
+internal fun pairNumberStyle(number: TextKeyboard, t9: TextKeyboard, defaultWidth: Float = 10f): TextKeyboard {
+    fun positioned(layout: TextKeyboard): List<Pair<Int, Float>> {
+        var row = 0
+        var x = 0f
+        var column = 0
+        val columns = if (layout.columns == -1) Int.MAX_VALUE else layout.columns
+        return layout.keys.map { key ->
+            val slot = key.hasKeyboardSlot
+            val width = if (key.width == 0f && slot) {
+                layout.width.takeIf { it > 0 } ?: defaultWidth
+            } else {
+                key.width
+            }
+            if (column >= columns || x + width > 100.01f) {
+                row++
+                x = 0f
+                column = 0
+            }
+            val position = row to (x + width / 2f)
+            x += width
+            if (slot) column++
+            position
+        }
+    }
+    if (t9.keys.isEmpty()) return number
+    val sourcePositions = positioned(t9)
+    val targetPositions = positioned(number)
+    val styledKeys = number.keys.mapIndexed { index, key ->
+        val (row, x) = targetPositions[index]
+        val sourceIndex = sourcePositions.indices.minByOrNull {
+            val (sourceRow, sourceX) = sourcePositions[it]
+            kotlin.math.abs(sourceRow - row) * 1000f + kotlin.math.abs(sourceX - x)
+        } ?: return@mapIndexed key
+        val style = t9.keys[sourceIndex]
+        key.copy(
+            keyBackColor = style.keyBackColor,
+            keyTextColor = style.keyTextColor,
+            keyBorderColor = style.keyBorderColor,
+            keySymbolColor = style.keySymbolColor,
+            hilitedKeyBackColor = style.hilitedKeyBackColor,
+            hilitedKeyTextColor = style.hilitedKeyTextColor,
+            hilitedKeyBorderColor = style.hilitedKeyBorderColor,
+            hilitedKeySymbolColor = style.hilitedKeySymbolColor,
+        )
+    }
+    return number.copy(horizontalGap = t9.horizontalGap, verticalGap = t9.verticalGap, roundCorner = t9.roundCorner, keyBorder = t9.keyBorder, keys = styledKeys)
+}
+
 internal fun resolveKeyboardConfig(name: String, presets: Map<String, TextKeyboard>): TextKeyboard? {
     val visited = mutableSetOf<String>()
     var current = name

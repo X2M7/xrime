@@ -187,4 +187,35 @@ class KeyboardResolveTest :
                 }
             }
         }
+
+        Given("keyboard height in the physical orientation") {
+            fun height(
+                physicalLandscape: Boolean,
+                layoutMode: Boolean,
+                keyboardPortrait: Int? = null,
+                keyboardLandscape: Int? = null,
+            ): Int = resolveKeyboardHeightDp(
+                keyboardPortrait,
+                keyboardLandscape,
+                250,
+                180,
+                physicalLandscape,
+                layoutMode,
+            )
+
+            Then("a real landscape screen uses the theme landscape height even with landscape layout disabled") {
+                height(physicalLandscape = true, layoutMode = false) shouldBe 180
+            }
+            Then("portrait and explicitly enabled landscape layout retain their height behavior") {
+                height(physicalLandscape = false, layoutMode = false) shouldBe 250
+                height(physicalLandscape = false, layoutMode = true) shouldBe 180
+            }
+            Then("per-keyboard height retains precedence over theme height") {
+                height(physicalLandscape = true, layoutMode = false, keyboardPortrait = 300) shouldBe 300
+                height(physicalLandscape = true, layoutMode = false, keyboardPortrait = 300, keyboardLandscape = 160) shouldBe 160
+            }
+            Then("an unspecified landscape height falls back to its portrait counterpart") {
+                resolveKeyboardHeightDp(null, null, 250, 0, physicalLandscape = true, landscapeLayoutMode = false) shouldBe 250
+            }
+        }
     })

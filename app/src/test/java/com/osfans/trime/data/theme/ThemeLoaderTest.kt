@@ -245,6 +245,22 @@ class ThemeLoaderTest :
                 (result as? ThemeLoader.ThemeLoadResult.Success)?.theme?.name shouldBe "from_source"
             }
 
+            Then("an oversized source is rejected without native fallback") {
+                val file = sourceFile("x".repeat(ThemeYaml.CODE_POINT_LIMIT + 1))
+                try {
+                    val result = ThemeLoader.loadFromSource("large", file, noResources)
+                        .shouldBeInstanceOf<ThemeLoader.ThemeLoadResult.Failure>()
+                    result.error.shouldBeInstanceOf<ThemeLoader.ThemeLoadError.FileUnreadable>()
+                    val referring = sourceFile("name: parent\n__include: oversized:/\n")
+                    val loader = ThemeLoader.SourceLoader { id -> file.takeIf { id == "oversized" } }
+                    val included = ThemeLoader.loadFromSource("parent", referring, loader)
+                        .shouldBeInstanceOf<ThemeLoader.ThemeLoadResult.Failure>()
+                    included.error.shouldBeInstanceOf<ThemeLoader.ThemeLoadError.FileUnreadable>()
+                } finally {
+                    file.delete()
+                }
+            }
+
             Then("normal native parsing is informational while source errors retain their warning and cause") {
                 val entries = mutableListOf<Triple<Int, String, Throwable?>>()
                 val tree = object : Timber.Tree() {

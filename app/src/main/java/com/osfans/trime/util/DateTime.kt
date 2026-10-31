@@ -24,6 +24,20 @@ private val iso8601DateFormat by lazy {
 
 fun iso8601UTCDateTime(timeMillis: Long? = null): String = iso8601DateFormat.format(timeMillis?.let { Date(it) } ?: Date())
 
+/** ISO 8601 local time with an explicit offset, including on Android 5 and 6. */
+fun iso8601LocalDateTime(
+    timeMillis: Long = System.currentTimeMillis(),
+    timeZone: TimeZone = TimeZone.getDefault(),
+): String {
+    val date = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US).apply {
+        this.timeZone = timeZone
+    }.format(Date(timeMillis))
+    val offsetMinutes = timeZone.getOffset(timeMillis) / 60_000
+    val absoluteMinutes = kotlin.math.abs(offsetMinutes)
+    val sign = if (offsetMinutes < 0) '-' else '+'
+    return "$date$sign${(absoluteMinutes / 60).toString().padStart(2, '0')}:${(absoluteMinutes % 60).toString().padStart(2, '0')}"
+}
+
 fun customFormatTimeInDefault(
     pattern: String,
     timeMillis: Long? = null,

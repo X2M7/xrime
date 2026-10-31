@@ -23,6 +23,13 @@ function(trime_adapt_rime_config)
   trime_replace_dependency_cmake("${root}/rime/config/config_data.cc"
     "    if (!boost::ends_with(file_path.to_utf8_string(), \".custom.yaml\"))"
     "    if (!optional && !boost::ends_with(file_path.to_utf8_string(), \".custom.yaml\"))")
+  # yaml-cpp's literal emitter clips or adds trailing newlines and normalizes
+  # CRLF. Escaped double quotes preserve the exact scalar value on deployment.
+  trime_replace_dependency_cmake("${root}/rime/config/config_data.cc"
+    [=[  if (str_value.find_first_of("\r\n") != string::npos) {
+    *emitter << YAML::Literal;]=]
+    [=[  if (str_value.find_first_of("\r\n") != string::npos) {
+    *emitter << YAML::DoubleQuoted;]=])
 
   trime_replace_dependency_cmake("${root}/rime/config/config_compiler.h"
     "  an<ConfigResource> Compile(const string& file_name);"

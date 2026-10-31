@@ -52,6 +52,7 @@ class GradleVisibleBackportTest {
             val output = directory.resolve("result.jar")
             listOf(
                 "gradle-9.4.1.jar",
+                "gradle-9.5.0.jar",
                 "gradle-9.4.2.jar",
                 "symbol-processing-gradle-plugin-2.3.11.jar",
                 "instrumented-gradle-9.4.1.jar",
@@ -69,13 +70,72 @@ class GradleVisibleBackportTest {
     @Test
     fun `only audited raw or instrumented build plugins are eligible and unrelated jars use identity transform`() {
         assertEquals(true, GradleVisibleBackport.isTarget("gradle-9.4.1.jar"))
+        assertEquals(true, GradleVisibleBackport.isTarget("gradle-9.5.0.jar"))
         assertEquals(true, GradleVisibleBackport.isTarget("symbol-processing-gradle-plugin-2.3.11.jar"))
         assertEquals(true, GradleVisibleBackport.isTarget("instrumented-gradle-9.4.1.jar"))
         assertEquals(true, GradleVisibleBackport.isTarget("instrumented-symbol-processing-gradle-plugin-2.3.11.jar"))
         assertEquals(false, GradleVisibleBackport.isTarget("kotlin-gradle-plugin-2.4.21.jar"))
         assertEquals(false, GradleVisibleBackport.isTarget("gradle-tooling-api-9.8.1.jar"))
-        listOf("gradle-9.4.2.jar", "symbol-processing-gradle-plugin-2.3.12.jar", "instrumented-gradle-9.4.2.jar").forEach {
+        listOf("gradle-9.4.2.jar", "gradle-9.5.1.jar", "symbol-processing-gradle-plugin-2.3.12.jar", "instrumented-gradle-9.4.2.jar", "instrumented-gradle-9.5.0.jar").forEach {
             assertFailsWith<IllegalArgumentException> { GradleVisibleBackport.isTarget(it) }
+        }
+    }
+
+    @Test
+    fun `official AGP 9 5 artifact scans clean with identical entry bytes`() {
+        val input = java.io.File(requireNotNull(System.getProperty("xrime.test.agp950")))
+        val directory = createTempDirectory("gradle-agp95-audit").toFile()
+        try {
+            val output = directory.resolve("checked.jar")
+            assertEquals(0, GradleVisibleBackport.patchJar(input, output))
+            java.util.zip.ZipFile(input).use { original ->
+                java.util.zip.ZipFile(output).use { rewritten ->
+                    val entries = original.entries().asSequence().toList()
+                    assertEquals(entries.map { it.name }, rewritten.entries().asSequence().map { it.name }.toList())
+                    entries.forEach { entry ->
+                        assertContentEquals(
+                            original.getInputStream(entry).readBytes(),
+                            rewritten.getInputStream(rewritten.getEntry(entry.name)).readBytes(),
+                        )
+                    }
+                }
+            }
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `official AGP 9 4 remains supported by the original exact backport`() {
+        val input = java.io.File(requireNotNull(System.getProperty("xrime.test.agp941")))
+        val directory = createTempDirectory("gradle-agp941-audit").toFile()
+        try {
+            val output = directory.resolve("checked.jar")
+            assertEquals(28, GradleVisibleBackport.patchJar(input, output))
+            assertEquals(true, output.isFile)
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `a real AGP 9 5 jar with modified bytes is refused before output`() {
+        val input = java.io.File(requireNotNull(System.getProperty("xrime.test.agp950")))
+        val directory = createTempDirectory("gradle-agp95-tamper").toFile()
+        try {
+            val altered = directory.resolve("gradle-9.5.0.jar")
+            input.copyTo(altered)
+            java.io.RandomAccessFile(altered, "rw").use { file ->
+                file.seek(file.length() / 2)
+                val old = file.readUnsignedByte()
+                file.seek(file.filePointer - 1)
+                file.writeByte(old xor 1)
+            }
+            val output = directory.resolve("output.jar")
+            assertFailsWith<IllegalArgumentException> { GradleVisibleBackport.patchJar(altered, output) }
+            assertEquals(false, output.exists())
+        } finally {
+            directory.deleteRecursively()
         }
     }
 

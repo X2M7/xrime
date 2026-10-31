@@ -6,7 +6,11 @@
 package com.osfans.trime.ime.clipboard
 
 import android.content.Context
+import android.view.Gravity
+import android.view.View
 import android.widget.FrameLayout
+import android.widget.TextView
+import com.osfans.trime.R
 import com.osfans.trime.ime.symbol.SpacesItemDecoration
 import splitties.dimensions.dp
 import splitties.views.dsl.core.Ui
@@ -21,7 +25,14 @@ class ClipboardPageUi(override val ctx: Context) : Ui {
         addItemDecoration(SpacesItemDecoration(dp(4)))
     }
 
+    val emptyView = TextView(ctx).apply {
+        setText(R.string.clipboard_search_no_results)
+        gravity = Gravity.CENTER
+        visibility = View.GONE
+    }
+
     override val root = view(::FrameLayout) {
         add(recyclerView, lParams(matchParent, matchParent))
+        add(emptyView, lParams(matchParent, matchParent))
     }
 }

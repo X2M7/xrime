@@ -9,6 +9,7 @@ import com.charleskorn.kaml.YamlMap
 import com.charleskorn.kaml.YamlNode
 import com.osfans.trime.data.theme.ThemeYaml
 import com.osfans.trime.util.mapping
+import com.osfans.trime.util.readBytesAtMost
 import com.osfans.trime.util.sequence
 import com.osfans.trime.util.string
 import com.osfans.trime.util.untagged
@@ -51,8 +52,7 @@ internal object ConfigImportValidator {
         val text = if (dictionary) {
             readDictionaryHeader(file)
         } else {
-            require(file.length() in 1..MAX_YAML_BYTES.toLong()) { "Configuration is empty or exceeds 2 MiB: $relativePath" }
-            decodeUtf8(file.readBytes())
+            readConfigurationText(file, relativePath)
         }
         // The bundled tongwenfeng theme contains more than 100 aliases. Preserve the
         // existing theme parser's finite budget, while ordinary configs use 50 aliases.
@@ -132,6 +132,13 @@ internal object ConfigImportValidator {
         }
         val path = reference.substringAfter(':', "").removePrefix("/")
         require(path.split('/').none { it == ".." || '\\' in it || '\u0000' in it }) { "Configuration reference escapes its resource" }
+    }
+
+    internal fun readConfigurationText(file: File, relativePath: String): String {
+        require(file.length() in 1..MAX_YAML_BYTES.toLong()) { "Configuration is empty or exceeds 2 MiB: $relativePath" }
+        val bytes = file.readBytesAtMost(MAX_YAML_BYTES)
+        require(bytes.isNotEmpty()) { "Configuration is empty: $relativePath" }
+        return decodeUtf8(bytes)
     }
 
     private fun decodeUtf8(bytes: ByteArray): String = Charsets.UTF_8.newDecoder()

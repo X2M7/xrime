@@ -44,6 +44,34 @@ class SafDirectoryListingTest :
             SafDirectoryListing.readRows(TestDocumentRows(emptyList())) shouldBe emptyList()
         }
 
+        "oversized rows and unbounded listings fail without returning partial results" {
+            val oversized = documentRow("a", "n".repeat(SafListingBudget.MAX_NAME_CHARS + 1))
+            shouldThrow<IllegalStateException> {
+                SafDirectoryListing.readRows(TestDocumentRows(listOf(documentRow("first"), oversized)))
+            }
+            val endless = object : SafDirectoryListing.Rows {
+                var index = 0
+                override val loading = false
+                override val error: String? = null
+                override fun moveToNext() = true
+                override fun current(): SafDirectoryListing.Row = documentRow("row-${index++}")
+            }
+            shouldThrow<IllegalStateException> { SafDirectoryListing.readRows(endless) }
+            endless.index shouldBe SafListingBudget.MAX_ENTRIES + 1
+        }
+
+        "listing budgets accept boundaries and reject excessive metadata or paths" {
+            SafListingBudget().accept("i".repeat(SafListingBudget.MAX_ID_CHARS), "名", "text/plain")
+            SafListingBudget().accept("i", "n".repeat(SafListingBudget.MAX_NAME_CHARS), "m".repeat(SafListingBudget.MAX_MIME_CHARS))
+            SafListingBudget().accept("i", "n", "m", "p".repeat(SafListingBudget.MAX_PATH_CHARS - 2))
+            shouldThrow<IllegalStateException> { SafListingBudget().accept("i".repeat(SafListingBudget.MAX_ID_CHARS + 1), "n", "m") }
+            shouldThrow<IllegalStateException> { SafListingBudget().accept("i", "n", "m".repeat(SafListingBudget.MAX_MIME_CHARS + 1)) }
+            shouldThrow<IllegalStateException> { SafListingBudget().accept("i", "n", "m", "p".repeat(SafListingBudget.MAX_PATH_CHARS - 1)) }
+            val aggregate = SafListingBudget()
+            repeat(1023) { aggregate.accept("i", "n".repeat(SafListingBudget.MAX_NAME_CHARS), "m") }
+            shouldThrow<IllegalStateException> { aggregate.accept("i", "n".repeat(SafListingBudget.MAX_NAME_CHARS), "m") }
+        }
+
         "duplicate name after an unrelated first child is rejected" {
             shouldThrow<IllegalStateException> {
                 SafDirectoryListing.readRows(

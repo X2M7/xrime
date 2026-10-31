@@ -34,6 +34,9 @@ import com.osfans.trime.provider.RimeDataProvider
 import io.github.whiredplanck.storageaccess.StorageAccess
 import io.github.whiredplanck.storageaccess.StorageDocument
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.CancellationException
 import java.io.File
 import java.io.FileNotFoundException
 import java.io.IOException
@@ -139,12 +142,13 @@ object SafCompatibilityProbe {
             it.getInt(0) and Document.FLAG_SUPPORTS_RENAME != 0
         } ?: error("Cannot query document: $uri")
 
-        override suspend fun digest(uri: Uri): ByteArray {
+        override suspend fun digest(uri: Uri, maxBytes: Long): ByteArray {
+            val context = currentCoroutineContext()
             val descriptor =
                 resolver.openFileDescriptor(uri, "r")
                     ?: error("Cannot read document: $uri")
             return ParcelFileDescriptor.AutoCloseInputStream(descriptor).use { input ->
-                SyncFingerprint.digest(input).also {
+                SyncFingerprint.digest(input, maxBytes) { context.ensureActive() }.also {
                     if (descriptor.canDetectErrors()) descriptor.checkError()
                 }
             }
@@ -423,6 +427,14 @@ object SafCompatibilityProbe {
                 check(p.file("sample.yaml").readBytes().contentEquals(source.readBytes()))
                 check(p.names().toSet() == setOf("first.yaml", "sample.yaml"))
             }
+            test("oversized listing cannot replace or delete tracked files") { p, cr, source ->
+                p.seed("sample.yaml", "old")
+                p.seed("n".repeat(4097), "unrelated")
+                expectFailure { productionCopy(cr, source) }
+                check(p.file("sample.yaml").readText() == "old")
+                expectRejectedListingPreservesTrackedLocal(cr)
+                check(p.file("sample.yaml").readText() == "old")
+            }
             test("production listing rejects a document outside a tree URI") { _, cr, _ ->
                 expectFailure { SafDirectoryListing.list(cr, DocumentsContract.buildDocumentUri(authority, "root")) }
             }
@@ -442,6 +454,39 @@ object SafCompatibilityProbe {
                     }
                 }
                 check(local.readBytes().contentEquals(source.readBytes()))
+            }
+            test("production replacement accepts unknown-length read-back") { p, cr, source ->
+                p.pipeReads = true
+                p.seed("sample.yaml", "old")
+                productionCopy(cr, source)
+                check(p.file("sample.yaml").readBytes().contentEquals(source.readBytes()))
+                check(p.names() == listOf("sample.yaml"))
+            }
+            test("overlong unknown-length published read-back restores the original") { p, cr, source ->
+                p.pipeReads = true
+                p.appendPublishedRead = true
+                p.seed("sample.yaml", "old")
+                expectFailure { productionCopy(cr, source) }
+                check(p.file("sample.yaml").readText() == "old")
+                check(p.names() == listOf("sample.yaml"))
+            }
+            test("cancellation during published read-back restores the original") { p, cr, source ->
+                p.seed("sample.yaml", "old")
+                val delegate = ResolverExternalFileOperations(cr)
+                val operations = object : UserDataManager.ExternalFileOperations by delegate {
+                    var reads = 0
+                    override suspend fun digest(uri: Uri, maxBytes: Long): ByteArray {
+                        if (++reads == 2) throw CancellationException("injected cancellation")
+                        return delegate.digest(uri, maxBytes)
+                    }
+                }
+                val root = DocumentsContract.buildDocumentUriUsingTree(tree, "root")
+                val failure = runCatching {
+                    runBlocking { UserDataManager.replaceExternalFileForTesting(source, root, "sample.yaml", operations) }
+                }.exceptionOrNull()
+                check(failure is CancellationException)
+                check(p.file("sample.yaml").readText() == "old")
+                check(p.names() == listOf("sample.yaml"))
             }
             test("write failure cleans temporary document") { p, cr, source ->
                 p.seed("sample.yaml", "old")
@@ -615,6 +660,7 @@ object SafCompatibilityProbe {
         var failWrite = false
         var corruptRead = false
         var corruptPublishedRead = false
+        var appendPublishedRead = false
         var failPublish = false
         var failRestore = false
         var loading = false
@@ -714,6 +760,7 @@ object SafCompatibilityProbe {
         override fun openDocument(documentId: String, mode: String, signal: CancellationSignal?): ParcelFileDescriptor {
             val node = nodes.getValue(documentId)
             if (mode.contains('w') && failWrite) throw FileNotFoundException("Injected write failure")
+            if (mode == "r" && appendPublishedRead && node.name == "sample.yaml") node.file.appendText("extra")
             if (
                 mode == "r" &&
                 (

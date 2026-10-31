@@ -19,7 +19,7 @@ import timber.log.Timber
 class KeyActionTest :
     BehaviorSpec({
         val platformLookup = KeyCode.androidKeyNameToCode
-        beforeSpec { KeyCode.androidKeyNameToCode = KeyCodeTestSupport::androidKeyNameToCode }
+        beforeTest { KeyCode.androidKeyNameToCode = KeyCodeTestSupport::androidKeyNameToCode }
         afterSpec { KeyCode.androidKeyNameToCode = platformLookup }
 
         val presetKeys = ThemeTestSupport.decodeBuiltinTheme("trime.yaml").presetKeys

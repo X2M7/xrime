@@ -41,4 +41,26 @@ class BuildTimestampTest {
             assertFailsWith<IllegalArgumentException>(it) { normalizeBuildTimestamp(it) }
         }
     }
+
+    @Test
+    fun `source date epoch uses nonnegative whole seconds without guessing units`() {
+        assertEquals("0", normalizeSourceDateEpoch("0"))
+        assertEquals("123000", normalizeSourceDateEpoch("123"))
+        assertEquals("1788912298000", normalizeSourceDateEpoch("1788912298"))
+        assertEquals("1788912298123000", normalizeSourceDateEpoch("1788912298123"))
+        assertEquals("9223372036854775000", normalizeSourceDateEpoch("9223372036854775"))
+        listOf("", "-1", "+1", " 1", "1\n", "1.0", "１２", "9223372036854776", "9223372036854775808").forEach {
+            assertFailsWith<IllegalArgumentException>(it) { normalizeSourceDateEpoch(it) }
+        }
+    }
+
+    @Test
+    fun `explicit timestamp wins then source date then existing clock fallback`() {
+        val unexpectedFallback = { error("fallback must stay lazy") }
+        assertEquals("1788912298000", resolveBuildTimestamp("1788912298", "invalid", unexpectedFallback))
+        assertEquals("123000", resolveBuildTimestamp(null, "123", unexpectedFallback))
+        assertEquals("1788912298123", resolveBuildTimestamp(null, null) { "1788912298123" })
+        assertFailsWith<IllegalArgumentException> { resolveBuildTimestamp("invalid", "123", unexpectedFallback) }
+        assertFailsWith<IllegalArgumentException> { resolveBuildTimestamp(null, "invalid", unexpectedFallback) }
+    }
 }

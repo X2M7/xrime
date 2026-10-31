@@ -20,6 +20,7 @@ import org.gradle.api.tasks.TaskAction
 import org.gradle.kotlin.dsl.register
 import org.gradle.process.ExecOperations
 import java.io.File
+import java.security.MessageDigest
 import java.util.regex.Pattern
 import javax.inject.Inject
 
@@ -36,6 +37,55 @@ internal fun openccHostCmakeArguments(osName: String, osArch: String, msvcTarget
         "Initialize the native MSVC Developer Command Prompt for $platform before generating OpenCC data"
     }
     return listOf("-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_CXX_COMPILER=cl")
+}
+
+/** Explicit portable x64 host alternative; the normal MSVC path remains the default. */
+internal fun openccZigCmakeArguments(osName: String, osArch: String, zig: String, ar: String, ranlib: String): List<String> {
+    check(osName.startsWith("Windows", ignoreCase = true) && osArch.lowercase() in setOf("amd64", "x86_64")) {
+        "The audited portable Zig host toolchain supports Windows x64 only"
+    }
+    return listOf(
+        "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release",
+        "-DCMAKE_CXX_COMPILER=$zig", "-DCMAKE_CXX_COMPILER_ARG1=c++ -U_WIN32_WINNT",
+        "-DCMAKE_RC_COMPILER=$zig", "-DCMAKE_RC_COMPILER_ARG1=rc",
+        "-DCMAKE_AR=$ar", "-DCMAKE_RANLIB=$ranlib",
+    )
+}
+
+private fun verifiedZigHostCmakeArguments(root: String, osName: String, osArch: String): List<String> {
+    val zigRoot = File(root).canonicalFile
+    val zig = zigRoot.resolve("zig.exe")
+    check(zig.isFile && zigRoot.resolve("lib").isDirectory) { "The portable Zig compiler or its libraries are missing" }
+    val digest = MessageDigest.getInstance("SHA-256")
+    zig.inputStream().buffered().use { stream ->
+        val buffer = ByteArray(1024 * 1024)
+        while (true) {
+            val count = stream.read(buffer)
+            if (count < 0) break
+            digest.update(buffer, 0, count)
+        }
+    }
+    check(digest.digest().joinToString("") { "%02x".format(it) } == "d408dd38eed3e5204af841bcebf70502a4dbbb8399a3a3262be55059370bc018") {
+        "The portable Zig compiler does not match the audited 0.15.2 executable"
+    }
+    val sdk = System.getenv("ANDROID_SDK_ROOT") ?: System.getenv("ANDROID_HOME")
+        ?: error("ANDROID_SDK_ROOT or ANDROID_HOME is required for the pinned LLVM archiver")
+    val ndk = File(sdk, "ndk/${Versions.DEFAULT_NDK}")
+    check(ndk.resolve("source.properties").readText().lineSequence().any { it.trim() == "Pkg.Revision = ${Versions.DEFAULT_NDK}" }) {
+        "The pinned Android NDK is missing or has an unexpected revision"
+    }
+    val bin = ndk.resolve("toolchains/llvm/prebuilt/windows-x86_64/bin")
+    val ar = bin.resolve("llvm-ar.exe").canonicalFile
+    val ranlib = bin.resolve("llvm-ranlib.exe").canonicalFile
+    check(ar.isFile && ranlib.isFile) { "The pinned NDK LLVM archive tools are missing" }
+    // CMake serializes compiler paths into .cmake files; Windows backslashes
+    // would be interpreted there as escape sequences.
+    return openccZigCmakeArguments(
+        osName, osArch,
+        zig.canonicalPath.replace('\\', '/'),
+        ar.path.replace('\\', '/'),
+        ranlib.path.replace('\\', '/'),
+    )
 }
 
 /** Reject an asset set that would make a bundled conversion config fail at runtime. */
@@ -66,6 +116,7 @@ class OpenCCDataPlugin : Plugin<Project> {
             sourceDir.set(project.layout.projectDirectory.dir("src/main/jni/librime/deps/opencc"))
             adaptationDir.set(project.layout.projectDirectory.dir("src/main/jni/cmake"))
             outputDir.set(project.layout.buildDirectory.dir("opencc-host"))
+            pythonExecutable.set(project.providers.environmentVariable("TRIME_OPENCC_PYTHON").orElse("python3"))
             cmakeExecutable.set(
                 project.providers.gradleProperty("openccCmakeExecutable")
                     .orElse(project.providers.environmentVariable("CMAKE_EXECUTABLE"))
@@ -76,6 +127,7 @@ class OpenCCDataPlugin : Plugin<Project> {
             project.tasks.register<InstallOpenCCDataTask>(INSTALL_TASK) {
                 inputDir.set(project.dataBaseDir)
                 outputDir.set(project.dataInstallDir)
+                pythonExecutable.set(project.providers.environmentVariable("TRIME_OPENCC_PYTHON").orElse("python3"))
                 regionalPhrasesFile.set(regionalPhrases.flatMap { it.outputDir.file("OpenCC/data/STPhrases_GeneratedFromRegionalPhrases.txt") })
             }
         // make sure OpenCC data have been installed before generating data checksums
@@ -111,8 +163,18 @@ class OpenCCDataPlugin : Plugin<Project> {
         abstract val cmakeExecutable: Property<String>
 
         @get:Input
+        abstract val pythonExecutable: Property<String>
+
+        @get:Input
         val hostCmakeArguments: List<String>
-            get() = openccHostCmakeArguments(System.getProperty("os.name"), hostArchitecture, System.getenv("VSCMD_ARG_TGT_ARCH"))
+            get() {
+                val zig = System.getenv("TRIME_OPENCC_ZIG_ROOT").orEmpty()
+                return if (zig.isEmpty()) {
+                    openccHostCmakeArguments(System.getProperty("os.name"), hostArchitecture, System.getenv("VSCMD_ARG_TGT_ARCH"))
+                } else {
+                    verifiedZigHostCmakeArguments(zig, System.getProperty("os.name"), hostArchitecture)
+                }
+            }
 
         @get:Input
         val hostArchitecture: String
@@ -134,7 +196,7 @@ class OpenCCDataPlugin : Plugin<Project> {
                         "-B",
                         output.absolutePath,
                         "-DTRIME_OPENCC_SOURCE_DIR=${sourceDir.get().asFile.absolutePath}",
-                    ) + hostCmakeArguments,
+                    ) + (if (pythonExecutable.get() == "python3") emptyList() else listOf("-DPython3_EXECUTABLE=${pythonExecutable.get().replace('\\', '/')}")) + hostCmakeArguments,
                 )
             }.assertNormalExitValue()
             execOperations.exec {
@@ -158,6 +220,9 @@ class OpenCCDataPlugin : Plugin<Project> {
 
         @get:OutputDirectory
         abstract val outputDir: DirectoryProperty
+
+        @get:Input
+        abstract val pythonExecutable: Property<String>
 
         @get:PathSensitive(PathSensitivity.NONE)
         @get:InputFile
@@ -246,7 +311,7 @@ class OpenCCDataPlugin : Plugin<Project> {
             execOperations.exec {
                 workingDir = output
                 commandLine = listOf(
-                    "python3",
+                    pythonExecutable.get(),
                     input.resolve("scripts/${generated.script}").absolutePath,
                     dictionary.resolve("${generated.source}.txt").absolutePath,
                     "$name.txt",

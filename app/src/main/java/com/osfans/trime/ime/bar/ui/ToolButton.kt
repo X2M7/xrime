@@ -84,6 +84,15 @@ class ToolButton(context: Context, private val scope: ThemeScope) : GestureFrame
             updateAccessibilityLabel()
         }
 
+    /** Optional explicit toggle state for icon buttons backed by application preferences. */
+    var accessibilityChecked: Boolean? = null
+        set(value) {
+            if (field == value) return
+            field = value
+            isSelected = value ?: (accessibilityLabel == null && option != null && optionEnabled)
+            sendAccessibilityEvent(android.view.accessibility.AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED)
+        }
+
     private var fontSize = 0f
     private var colorStateList: ColorStateList? = null
 
@@ -198,8 +207,8 @@ class ToolButton(context: Context, private val scope: ThemeScope) : GestureFrame
     override fun onInitializeAccessibilityNodeInfo(info: AccessibilityNodeInfo) {
         super.onInitializeAccessibilityNodeInfo(info)
         info.className = Button::class.java.name
-        info.isCheckable = option != null && accessibilityLabel == null
-        val checked = info.isCheckable && optionEnabled
+        info.isCheckable = accessibilityChecked != null || (option != null && accessibilityLabel == null)
+        val checked = accessibilityChecked ?: (info.isCheckable && optionEnabled)
         info.setCheckedState(checked)
         info.isSelected = checked
     }
@@ -209,7 +218,7 @@ class ToolButton(context: Context, private val scope: ThemeScope) : GestureFrame
             ?: actionLabel.takeIf { it.isNotBlank() }
             ?: label.text.takeIf { label.isVisible && it.isNotBlank() }
             ?: context.getString(R.string.a11y_keyboard_options)
-        isSelected = accessibilityLabel == null && option != null && optionEnabled
+        isSelected = accessibilityChecked ?: (accessibilityLabel == null && option != null && optionEnabled)
     }
 
     fun updateStyle(option: String, enabled: Boolean) {

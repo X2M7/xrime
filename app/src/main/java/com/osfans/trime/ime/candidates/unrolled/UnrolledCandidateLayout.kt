@@ -42,6 +42,8 @@ class UnrolledCandidateLayout(
     val recyclerView =
         recyclerView {
             isVerticalScrollBarEnabled = false
+            // A stretched edge can consume the next tap instead of selecting a candidate.
+            overScrollMode = android.view.View.OVER_SCROLL_NEVER
         }
 
     init {

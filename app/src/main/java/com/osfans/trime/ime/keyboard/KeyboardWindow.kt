@@ -59,6 +59,18 @@ import splitties.views.dsl.core.lParams
 import splitties.views.dsl.core.matchParent
 import timber.log.Timber
 
+internal data class ClipboardSearchKeyboardSnapshot(
+    val schema: String,
+    val themeIdentity: Int,
+    val keyboardId: String,
+    val lastKeyboardId: String,
+    val lastLockKeyboardId: String,
+    val auxiliaryReturn: EditorModeOverride?,
+    val restrictedEditor: Boolean,
+    val desiredAsciiMode: Boolean?,
+    val lastAsciiMode: Boolean,
+)
+
 class KeyboardWindow(di: DI) :
     BoardWindow.NoBarBoardWindow(di),
     ResidentWindow,
@@ -130,7 +142,7 @@ class KeyboardWindow(di: DI) :
             val origin = auxiliaryReturn
             return T9LayoutPolicy.usesCompositionPanel(
                 currentKeyboard.isT9Layout,
-                currentKeyboardId == evalKeyboard("symbols"),
+                currentKeyboardId == evalKeyboard("symbols") || currentKeyboardId == evalKeyboard("number"),
                 restrictedEditor,
                 origin?.let { selectKeyboardConfig(it.keyboardId)?.t9Layout } == true,
                 origin?.schemaId == rime.run { statusCached.schemaId },
@@ -152,6 +164,8 @@ class KeyboardWindow(di: DI) :
         // all controls and keys when that complete model cannot fit.
         val modelHeight = if (currentKeyboard.isT9Layout) {
             T9LayoutPolicy.modelHeight(currentKeyboard.requestedKeyboardHeight, maximum, context.dp(192))
+        } else if (currentKeyboard.pairedHeightPx > 0) {
+            pairedNumberHeight(currentKeyboardId, maximum)
         } else {
             currentKeyboard.requestedKeyboardHeight
         }
@@ -250,17 +264,38 @@ class KeyboardWindow(di: DI) :
         theme.presetKeyboards["default"]?.takeIf { it.importPreset.isEmpty() }
     }
 
+    private fun pairedNumberHeight(target: String, budget: Int = t9HeightBudgetPx): Int {
+        if (restrictedEditor || target != evalKeyboard("number")) return 0
+        val origin = auxiliaryReturn ?: return 0
+        if (origin.schemaId != rime.run { statusCached.schemaId }) return 0
+        val source = cachedKeyboards[origin.keyboardId]?.first ?: run {
+            val sourceConfig = selectKeyboardConfig(origin.keyboardId) ?: return 0
+            if (!sourceConfig.t9Layout) return 0
+            Keyboard(context, theme, computeAllowedWidth(), sourceConfig, budget)
+        }
+        if (!source.isT9Layout) return 0
+        return T9LayoutPolicy.modelHeight(source.requestedKeyboardHeight, budget, context.dp(192))
+    }
+
     private fun attachKeyboard(target: String, updateMode: Boolean = true) {
         val layoutChanged = currentKeyboardId != target
         currentKeyboardId = target
         if (!restrictedEditor && !isAuxiliaryKeyboard(target)) lastKeyboardId = target
 
-        val config = selectKeyboardConfig(target)
+        val pairedHeight = pairedNumberHeight(target)
+        val originalConfig = selectKeyboardConfig(target)
+        val originConfig = auxiliaryReturn?.let { selectKeyboardConfig(it.keyboardId) }
+        val config = if (pairedHeight > 0 && originalConfig != null && originConfig != null) {
+            pairNumberStyle(originalConfig, originConfig, theme.style.keyWidth)
+        } else {
+            originalConfig
+        }
+        if (activeKeyboard?.pairedHeightPx != pairedHeight) cachedKeyboards.remove(target)
         activeKeyboard?.takeIf { it.isT9Layout }?.let { cached ->
             val expected = T9LayoutPolicy.modelHeight(cached.requestedKeyboardHeight, t9HeightBudgetPx, context.dp(192))
             if (cached.keyboardHeight != expected) cachedKeyboards.remove(target)
         }
-        val keyboard = activeKeyboard ?: Keyboard(context, theme, computeAllowedWidth(), config, t9HeightBudgetPx)
+        val keyboard = activeKeyboard ?: Keyboard(context, theme, computeAllowedWidth(), config, t9HeightBudgetPx, pairedHeight)
         val view = currentKeyboardView ?: KeyboardView(context, theme, keyboard, popup, service, keyboardActionListener, enterKeyDisplay)
 
         if (activeKeyboard == null) {
@@ -393,7 +428,8 @@ class KeyboardWindow(di: DI) :
         }
     }
 
-    private fun isAuxiliaryKeyboard(id: String): Boolean = id == evalKeyboard("number") || id == evalKeyboard("symbols")
+    private fun isAuxiliaryKeyboard(id: String): Boolean = id == evalKeyboard("number") || id == evalKeyboard("symbols") ||
+        (id == "xrime_text_editor" && theme.presetKeyboards.containsKey("xrime_text_editor"))
 
     private fun plannedAsciiMode(): Boolean = service.keyboardLanguage.plannedAscii(
         service.editorToken,
@@ -402,7 +438,7 @@ class KeyboardWindow(di: DI) :
     )
 
     private fun languageKeyboard(ascii: Boolean): String = when (
-        service.currentInputEditorInfo?.let { EditorPolicy.keyboard(it.inputType, it.imeOptions) }
+        if (service.isClipboardSearchEditing) EditorKeyboard.USER else service.currentInputEditorInfo?.let { EditorPolicy.keyboard(it.inputType, it.imeOptions) }
     ) {
         EditorKeyboard.NUMBER -> evalKeyboard("number")
         EditorKeyboard.ASCII -> evalKeyboard(".ascii")
@@ -430,6 +466,39 @@ class KeyboardWindow(di: DI) :
         attachKeyboard(languageKeyboard(command.asciiMode), updateMode = false)
         currentKeyboard.lastAsciiMode = command.asciiMode
         enqueueMode(command, afterMode)
+    }
+
+    internal fun captureClipboardSearchKeyboard(): ClipboardSearchKeyboardSnapshot = ClipboardSearchKeyboardSnapshot(
+        rime.run { statusCached.schemaId }, System.identityHashCode(theme), currentKeyboardId,
+        lastKeyboardId, lastLockKeyboardId, auxiliaryReturn, restrictedEditor, desiredAsciiMode, currentKeyboard.lastAsciiMode,
+    )
+
+    internal fun restoreClipboardSearchKeyboard(snapshot: ClipboardSearchKeyboardSnapshot) {
+        if (snapshot.schema != rime.run { statusCached.schemaId } || snapshot.themeIdentity != System.identityHashCode(theme) ||
+            snapshot.keyboardId !in presetKeyboardIds
+        ) {
+            service.currentInputEditorInfo?.let { applyEditorKeyboard(it, schemaChanged = true) }
+            return
+        }
+        detachCurrentView()
+        restrictedEditor = snapshot.restrictedEditor
+        auxiliaryReturn = snapshot.auxiliaryReturn
+        attachKeyboard(snapshot.keyboardId, updateMode = false)
+        lastKeyboardId = snapshot.lastKeyboardId
+        lastLockKeyboardId = snapshot.lastLockKeyboardId
+        desiredAsciiMode = snapshot.desiredAsciiMode
+        currentKeyboard.lastAsciiMode = snapshot.lastAsciiMode
+    }
+
+    /** Search changes the temporary layout without changing the user's remembered language. */
+    internal fun switchSearchLanguage(targetAscii: Boolean? = null) {
+        val command = service.acceptKeyboardMode(targetAscii, rememberLanguage = false, KeyboardModeEffect.COMMIT) ?: return
+        auxiliaryReturn = null
+        desiredAsciiMode = command.asciiMode
+        detachCurrentView()
+        attachKeyboard(languageKeyboard(command.asciiMode), updateMode = false)
+        currentKeyboard.lastAsciiMode = command.asciiMode
+        enqueueMode(command)
     }
 
     private fun returnToMainKeyboard() {
@@ -524,6 +593,10 @@ class KeyboardWindow(di: DI) :
     /** Repaints the keyboard after a color-scheme switch; keys re-resolve their colors. */
     override fun refreshColors() {
         currentKeyboardView?.invalidateAllKeys()
+    }
+
+    override fun onEnterKeyLabelUpdate(label: String) {
+        cachedKeyboards.values.forEach { (_, view) -> view.updateEnterLabel() }
     }
 
     override fun onStartInput(info: EditorInfo) {
@@ -671,10 +744,6 @@ class KeyboardWindow(di: DI) :
         dispatchCapsState { on, shifted ->
             activeKeyboard?.setShifted(on, shifted)?.let { if (it) currentKeyboardView?.invalidateAllKeys() }
         }
-    }
-
-    override fun onEnterKeyLabelUpdate(label: String) {
-        currentKeyboardView?.updateEnterLabel()
     }
 
     override fun onRimeSchemaUpdated(schema: SchemaItem) {

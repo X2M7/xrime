@@ -27,6 +27,7 @@ import com.osfans.trime.core.Candidates
 import com.osfans.trime.core.CompositionProto
 import com.osfans.trime.core.RimeApi
 import com.osfans.trime.core.RimeMessage
+import com.osfans.trime.core.RimeInputAdmissionContext
 import com.osfans.trime.core.T9StateProto
 import com.osfans.trime.daemon.RimeSession
 import com.osfans.trime.data.prefs.AppPrefs
@@ -37,6 +38,7 @@ import com.osfans.trime.data.theme.ThemeScope
 import com.osfans.trime.ime.keyboard.InputFeedbackManager
 import com.osfans.trime.util.toast
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.asContextElement
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -59,12 +61,18 @@ abstract class BaseInputView(
     private var messageHandlerJob: Job? = null
 
     private fun setupRimeMessageHandler() {
-        messageHandlerJob =
-            service.lifecycleScope.launch {
-                rime.run { messageFlow }.collect {
-                    if (!it.isEditorResponse || service.isCurrentEditor(it.editorToken)) handleRimeMessage(it)
+        val consumer = service.registerInputConsumer()
+        messageHandlerJob = service.lifecycleScope.launch {
+            rime.run { messageFlow }.collect { message ->
+                if (message is RimeMessage.InputBarrierMessage) {
+                    service.acknowledgeInputBarrier(consumer, message.data)
+                } else if (service.prepareInputMessage(message)) {
+                    withContext(RimeInputAdmissionContext.current.asContextElement(message.inputAdmission.takeIf { it != 0L })) {
+                        if (!message.isEditorResponse || service.isCurrentEditor(message.editorToken)) handleRimeMessage(message)
+                    }
                 }
             }
+        }.also { job -> job.invokeOnCompletion { service.unregisterInputConsumer(consumer) } }
     }
 
     var handleMessages = false

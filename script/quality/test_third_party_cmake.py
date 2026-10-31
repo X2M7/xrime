@@ -38,7 +38,7 @@ class ThirdPartyCmakeTest(unittest.TestCase):
         opencc_source.mkdir()
         for name in ("DartsDict.cpp", "MarisaDict.cpp", "SerializableDict.hpp", "TextDict.cpp",
                      "Dict.hpp", "PrefixMatch.cpp", "PluginSegmentation.cpp", "plugin/OpenCCPlugin.h",
-                     "tools/CommandLineMain.cpp"):
+                     "tools/CommandLineMain.cpp", "tools/CommandLine.cpp"):
             target = opencc_source / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes((OPENCC / name).read_bytes())
@@ -403,7 +403,8 @@ endif()
         self.configure(success=False)
 
     def test_msvc_adapter_rejects_drift_before_any_source_write(self):
-        for relative, ending in (("tools/CommandLineMain.cpp", False),
+        for relative, ending in (("tools/CommandLine.cpp", False),
+                                 ("tools/CommandLineMain.cpp", False),
                                  ("PrefixMatch.cpp", False),
                                  ("PrefixMatch.cpp", True)):
             with self.subTest(relative=relative, crlf=ending):

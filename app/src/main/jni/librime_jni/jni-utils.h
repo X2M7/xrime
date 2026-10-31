@@ -37,18 +37,24 @@ static inline void throwJavaException(JNIEnv* env, const char* msg) {
   if (env->ExceptionCheck()) return;
   jclass c = env->FindClass("java/lang/Exception");
   if (!c) return;
-  auto init = env->GetMethodID(c, "<init>", "(Ljava/lang/String;)V");
-  if (init) {
-    auto message = makeJavaString(env, msg);
-    if (message) {
-      auto exception =
-          static_cast<jthrowable>(env->NewObject(c, init, message));
-      if (exception) {
-        env->Throw(exception);
-        env->DeleteLocalRef(exception);
+  try {
+    auto init = env->GetMethodID(c, "<init>", "(Ljava/lang/String;)V");
+    if (init) {
+      auto message = makeJavaString(env, msg);
+      if (message) {
+        auto exception =
+            static_cast<jthrowable>(env->NewObject(c, init, message));
+        if (exception) {
+          env->Throw(exception);
+          env->DeleteLocalRef(exception);
+        }
+        env->DeleteLocalRef(message);
       }
-      env->DeleteLocalRef(message);
     }
+  } catch (...) {
+    // Exception reporting must not let a second C++ allocation failure escape
+    // across JNI, and must never replace a Java exception already pending.
+    if (!env->ExceptionCheck()) env->ThrowNew(c, "Native operation failed");
   }
   env->DeleteLocalRef(c);
 }
@@ -59,6 +65,9 @@ static auto jniCall(JNIEnv* env, F&& call) -> decltype(call()) {
     return call();
   } catch (const std::exception& error) {
     throwJavaException(env, error.what());
+    if constexpr (!std::is_void_v<decltype(call())>) return {};
+  } catch (...) {
+    throwJavaException(env, "Native operation failed");
     if constexpr (!std::is_void_v<decltype(call())>) return {};
   }
 }
@@ -162,152 +171,172 @@ class JEnv {
   ~JEnv() {
     if (attached_) jvm_->DetachCurrentThread();
   }
+
   JEnv(const JEnv&) = delete;
   JEnv& operator=(const JEnv&) = delete;
+  JEnv(JEnv&&) = delete;
+  JEnv& operator=(JEnv&&) = delete;
 
   operator JNIEnv*() { return env; }
 
   JNIEnv* operator->() { return env; }
+
+  bool ownsAttachment() const { return attached_; }
 };
 
 class GlobalRefSingleton {
  public:
   JavaVM* jvm;
 
-  jclass Object;
+  jclass Object = nullptr;
 
-  jclass String;
+  jclass String = nullptr;
 
-  jclass Integer;
-  jmethodID IntegerInit;
+  jclass Integer = nullptr;
+  jmethodID IntegerInit = nullptr;
 
-  jclass Boolean;
-  jmethodID BooleanInit;
+  jclass Boolean = nullptr;
+  jmethodID BooleanInit = nullptr;
 
-  jclass Rime;
-  jmethodID HandleRimeMessage;
+  jclass Rime = nullptr;
+  jmethodID HandleRimeMessage = nullptr;
 
-  jclass CandidateProto;
-  jmethodID CandidateProtoInit;
+  jclass CandidateProto = nullptr;
+  jmethodID CandidateProtoInit = nullptr;
 
-  jclass CommitProto;
-  jmethodID CommitProtoInit;
+  jclass CommitProto = nullptr;
+  jmethodID CommitProtoInit = nullptr;
 
-  jclass ContextProto;
-  jmethodID ContextProtoInit;
+  jclass ContextProto = nullptr;
+  jmethodID ContextProtoInit = nullptr;
 
-  jclass CompositionProto;
-  jmethodID CompositionProtoInit;
+  jclass CompositionProto = nullptr;
+  jmethodID CompositionProtoInit = nullptr;
 
-  jclass StatusProto;
-  jmethodID StatusProtoInit;
+  jclass StatusProto = nullptr;
+  jmethodID StatusProtoInit = nullptr;
 
-  jclass RimeResponse;
-  jmethodID RimeResponseInit;
+  jclass RimeResponse = nullptr;
+  jmethodID RimeResponseInit = nullptr;
 
-  jclass CandidatesPaged;
-  jmethodID CandidatesPagedInit;
-  jmethodID CandidatesPagedSetPrediction;
+  jclass CandidatesPaged = nullptr;
+  jmethodID CandidatesPagedInit = nullptr;
+  jmethodID CandidatesPagedSetPrediction = nullptr;
 
-  jclass CandidatesBulk;
-  jmethodID CandidatesBulkInit;
-  jmethodID CandidatesBulkSetPrediction;
+  jclass CandidatesBulk = nullptr;
+  jmethodID CandidatesBulkInit = nullptr;
+  jmethodID CandidatesBulkSetPrediction = nullptr;
 
-  jclass SchemaListItem;
-  jmethodID SchemaListItemInit;
+  jclass SchemaListItem = nullptr;
+  jmethodID SchemaListItemInit = nullptr;
 
-  jclass KeyEvent;
-  jmethodID KeyEventInit;
+  jclass KeyEvent = nullptr;
+  jmethodID KeyEventInit = nullptr;
 
   explicit GlobalRefSingleton(JavaVM* jvm_) : jvm(jvm_) {
-    JNIEnv* env;
-    jvm->AttachCurrentThread(&env, nullptr);
-
-    Object = reinterpret_cast<jclass>(
-        env->NewGlobalRef(env->FindClass("java/lang/Object")));
-
-    String = reinterpret_cast<jclass>(
-        env->NewGlobalRef(env->FindClass("java/lang/String")));
-
-    Integer = reinterpret_cast<jclass>(
-        env->NewGlobalRef(env->FindClass("java/lang/Integer")));
-    IntegerInit = env->GetMethodID(Integer, "<init>", "(I)V");
-
-    Boolean = reinterpret_cast<jclass>(
-        env->NewGlobalRef(env->FindClass("java/lang/Boolean")));
-    BooleanInit = env->GetMethodID(Boolean, "<init>", "(Z)V");
-
-    Rime = reinterpret_cast<jclass>(
-        env->NewGlobalRef(env->FindClass("com/osfans/trime/core/Rime")));
-    HandleRimeMessage = env->GetStaticMethodID(Rime, "handleRimeMessage",
-                                               "(I[Ljava/lang/Object;)V");
-
-    CandidateProto = reinterpret_cast<jclass>(env->NewGlobalRef(
-        env->FindClass("com/osfans/trime/core/CandidateProto")));
-    CandidateProtoInit = env->GetMethodID(
-        CandidateProto, "<init>",
-        "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V");
-
-    CommitProto = reinterpret_cast<jclass>(
-        env->NewGlobalRef(env->FindClass("com/osfans/trime/core/CommitProto")));
-    CommitProtoInit =
-        env->GetMethodID(CommitProto, "<init>", "(Ljava/lang/String;)V");
-
-    ContextProto = reinterpret_cast<jclass>(env->NewGlobalRef(
-        env->FindClass("com/osfans/trime/core/ContextProto")));
-    ContextProtoInit =
-        env->GetMethodID(ContextProto, "<init>",
-                         "(Lcom/osfans/trime/core/CompositionProto;Ljava/lang/"
-                         "String;I)V");
-
-    CompositionProto = reinterpret_cast<jclass>(env->NewGlobalRef(
-        env->FindClass("com/osfans/trime/core/CompositionProto")));
-    CompositionProtoInit =
-        env->GetMethodID(CompositionProto, "<init>",
-                         "(IIIILjava/lang/String;Ljava/lang/String;)V");
-
-    StatusProto = reinterpret_cast<jclass>(
-        env->NewGlobalRef(env->FindClass("com/osfans/trime/core/StatusProto")));
-    StatusProtoInit =
-        env->GetMethodID(StatusProto, "<init>",
-                         "(Ljava/lang/String;Ljava/lang/String;ZZZZZZZ)V");
-
-    RimeResponse = reinterpret_cast<jclass>(env->NewGlobalRef(
-        env->FindClass("com/osfans/trime/core/RimeResponse")));
-    RimeResponseInit = env->GetMethodID(
-        RimeResponse, "<init>",
-        "(Lcom/osfans/trime/core/CommitProto;Lcom/osfans/trime/core/"
-        "CompositionProto;Lcom/osfans/trime/core/Candidates;"
-        "Lcom/osfans/trime/core/StatusProto;)V");
-
-    CandidatesPaged = reinterpret_cast<jclass>(env->NewGlobalRef(
-        env->FindClass("com/osfans/trime/core/Candidates$Paged")));
-    CandidatesPagedInit =
-        env->GetMethodID(CandidatesPaged, "<init>",
-                         "(ZZZI[Lcom/osfans/trime/core/CandidateProto;)V");
-    CandidatesPagedSetPrediction =
-        env->GetMethodID(CandidatesPaged, "setPrediction", "(Z)V");
-
-    CandidatesBulk = reinterpret_cast<jclass>(env->NewGlobalRef(
-        env->FindClass("com/osfans/trime/core/Candidates$Bulk")));
-    CandidatesBulkInit =
-        env->GetMethodID(CandidatesBulk, "<init>",
-                         "(II[Lcom/osfans/trime/core/CandidateProto;)V");
-    CandidatesBulkSetPrediction =
-        env->GetMethodID(CandidatesBulk, "setPrediction", "(Z)V");
-
-    SchemaListItem = reinterpret_cast<jclass>(
-        env->NewGlobalRef(env->FindClass("com/osfans/trime/core/SchemaItem")));
-    SchemaListItemInit = env->GetMethodID(
-        SchemaListItem, "<init>", "(Ljava/lang/String;Ljava/lang/String;)V");
-
-    KeyEvent = reinterpret_cast<jclass>(env->NewGlobalRef(
-        env->FindClass("com/osfans/trime/core/RimeKeyEvent")));
-    KeyEventInit =
-        env->GetMethodID(KeyEvent, "<init>", "(IILjava/lang/String;)V");
+    JEnv attachment(jvm);
+    JNIEnv* env = attachment;
+    try {
+      Object = globalClass(env, "java/lang/Object");
+      String = globalClass(env, "java/lang/String");
+      Integer = globalClass(env, "java/lang/Integer");
+      IntegerInit = method(env, Integer, "<init>", "(I)V");
+      Boolean = globalClass(env, "java/lang/Boolean");
+      BooleanInit = method(env, Boolean, "<init>", "(Z)V");
+      Rime = globalClass(env, "com/osfans/trime/core/Rime");
+      HandleRimeMessage = method(env, Rime, "handleRimeMessage",
+                                 "(I[Ljava/lang/Object;)V", true);
+      CandidateProto = globalClass(env, "com/osfans/trime/core/CandidateProto");
+      CandidateProtoInit =
+          method(env, CandidateProto, "<init>",
+                 "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V");
+      CommitProto = globalClass(env, "com/osfans/trime/core/CommitProto");
+      CommitProtoInit =
+          method(env, CommitProto, "<init>", "(Ljava/lang/String;)V");
+      ContextProto = globalClass(env, "com/osfans/trime/core/ContextProto");
+      ContextProtoInit = method(
+          env, ContextProto, "<init>",
+          "(Lcom/osfans/trime/core/CompositionProto;Ljava/lang/String;I)V");
+      CompositionProto =
+          globalClass(env, "com/osfans/trime/core/CompositionProto");
+      CompositionProtoInit =
+          method(env, CompositionProto, "<init>",
+                 "(IIIILjava/lang/String;Ljava/lang/String;)V");
+      StatusProto = globalClass(env, "com/osfans/trime/core/StatusProto");
+      StatusProtoInit =
+          method(env, StatusProto, "<init>",
+                 "(Ljava/lang/String;Ljava/lang/String;ZZZZZZZ)V");
+      RimeResponse = globalClass(env, "com/osfans/trime/core/RimeResponse");
+      RimeResponseInit =
+          method(env, RimeResponse, "<init>",
+                 "(Lcom/osfans/trime/core/CommitProto;Lcom/osfans/trime/core/"
+                 "CompositionProto;Lcom/osfans/trime/core/Candidates;Lcom/"
+                 "osfans/trime/core/StatusProto;)V");
+      CandidatesPaged =
+          globalClass(env, "com/osfans/trime/core/Candidates$Paged");
+      CandidatesPagedInit =
+          method(env, CandidatesPaged, "<init>",
+                 "(ZZZI[Lcom/osfans/trime/core/CandidateProto;)V");
+      CandidatesPagedSetPrediction =
+          method(env, CandidatesPaged, "setPrediction", "(Z)V");
+      CandidatesBulk =
+          globalClass(env, "com/osfans/trime/core/Candidates$Bulk");
+      CandidatesBulkInit =
+          method(env, CandidatesBulk, "<init>",
+                 "(II[Lcom/osfans/trime/core/CandidateProto;)V");
+      CandidatesBulkSetPrediction =
+          method(env, CandidatesBulk, "setPrediction", "(Z)V");
+      SchemaListItem = globalClass(env, "com/osfans/trime/core/SchemaItem");
+      SchemaListItemInit = method(env, SchemaListItem, "<init>",
+                                  "(Ljava/lang/String;Ljava/lang/String;)V");
+      KeyEvent = globalClass(env, "com/osfans/trime/core/RimeKeyEvent");
+      KeyEventInit = method(env, KeyEvent, "<init>", "(IILjava/lang/String;)V");
+    } catch (...) {
+      releaseGlobalRefs(env);
+      throw;
+    }
   }
 
   [[nodiscard]] JEnv AttachEnv() const { return JEnv(jvm); }
+
+  /** Only called when initialization fails, while the JVM remains attached. */
+  void releaseGlobalRefs(JNIEnv* env) {
+    jclass* refs[] = {&Object,         &String,         &Integer,
+                      &Boolean,        &Rime,           &CandidateProto,
+                      &CommitProto,    &ContextProto,   &CompositionProto,
+                      &StatusProto,    &RimeResponse,   &CandidatesPaged,
+                      &CandidatesBulk, &SchemaListItem, &KeyEvent};
+    for (auto ref : refs) {
+      if (*ref) env->DeleteGlobalRef(*ref);
+      *ref = nullptr;
+    }
+  }
+
+ private:
+  static jclass globalClass(JNIEnv* env, const char* name) {
+    if (env->ExceptionCheck())
+      throw std::runtime_error("Java class lookup failed");
+    JRef<jclass> local(env, env->FindClass(name));
+    if (!*local || env->ExceptionCheck())
+      throw std::runtime_error("Java class lookup failed");
+    auto global = reinterpret_cast<jclass>(env->NewGlobalRef(*local));
+    if (!global || env->ExceptionCheck()) {
+      if (global) env->DeleteGlobalRef(global);
+      throw std::runtime_error("Java global reference creation failed");
+    }
+    return global;
+  }
+
+  static jmethodID method(JNIEnv* env, jclass type, const char* name,
+                          const char* signature, bool is_static = false) {
+    if (env->ExceptionCheck())
+      throw std::runtime_error("Java method lookup failed");
+    auto result = is_static ? env->GetStaticMethodID(type, name, signature)
+                            : env->GetMethodID(type, name, signature);
+    if (!result || env->ExceptionCheck())
+      throw std::runtime_error("Java method lookup failed");
+    return result;
+  }
 };
 
 extern GlobalRefSingleton* GlobalRef;

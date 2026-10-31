@@ -86,6 +86,57 @@ class DictionaryTextFormatsTest :
             }
         }
 
+        "staging tolerates temporary zero reads but rejects an unresponsive provider" {
+            val intermittent = object : java.io.InputStream() {
+                var reads = 0
+                override fun read(): Int = error("Bulk reads expected")
+                override fun read(buffer: ByteArray, offset: Int, length: Int): Int = when (reads++) {
+                    0, 1 -> 0
+                    2 -> { buffer[offset] = 'x'.code.toByte(); 1 }
+                    else -> -1
+                }
+            }
+            DictionaryTextFormats.readBounded(intermittent, 1).toList() shouldBe listOf('x'.code.toByte())
+            val stuck = object : java.io.InputStream() {
+                override fun read() = 0
+                override fun read(buffer: ByteArray, offset: Int, length: Int) = 0
+            }
+            shouldThrow<IOException> { DictionaryTextFormats.readBounded(stuck, 16) }
+            val cancelled = java.util.concurrent.CancellationException("provider cancelled")
+            val cancelledStream = object : java.io.InputStream() {
+                override fun read(): Int = throw cancelled
+                override fun read(buffer: ByteArray, offset: Int, length: Int): Int = throw cancelled
+            }
+            shouldThrow<java.util.concurrent.CancellationException> { DictionaryTextFormats.readBounded(cancelledStream, 16) } shouldBe cancelled
+            withText("") { file ->
+                var checks = 0
+                shouldThrow<java.util.concurrent.CancellationException> {
+                    DictionaryTextFormats.copyBounded("value".byteInputStream(), file, 16) {
+                        if (++checks == 2) throw cancelled
+                    }
+                } shouldBe cancelled
+                file.length() shouldBe 0
+            }
+        }
+
+        "phrase snapshot validates exactly the bounded bytes it returns" {
+            val bytes = "entry\tcode\t1\n".toByteArray()
+            val snapshot = DictionaryTextFormats.readBounded(bytes.inputStream(), bytes.size.toLong())
+            DictionaryTextFormats.validateTable(snapshot) shouldBe 1
+            snapshot.toString(Charsets.UTF_8) shouldBe "entry\tcode\t1\n"
+            shouldThrow<IOException> { DictionaryTextFormats.readBounded((bytes + 1).inputStream(), bytes.size.toLong()) }
+            shouldThrow<IOException> { DictionaryTextFormats.validateTable(byteArrayOf(0xc3.toByte(), 0x28, 0x09, 0x61)) }
+        }
+
+        "local export limit fails before writing the excess byte" {
+            val output = java.io.ByteArrayOutputStream()
+            DictionaryDocumentStager.boundedOutput(output, 4).use { bounded ->
+                bounded.write(byteArrayOf(1, 2, 3, 4))
+                shouldThrow<IOException> { bounded.write(5) }
+            }
+            output.toByteArray().toList() shouldBe listOf<Byte>(1, 2, 3, 4)
+        }
+
         "malformed UTF-8 is rejected instead of silently replacing a phrase" {
             withText("") { file ->
                 file.writeBytes(byteArrayOf(0xc3.toByte(), 0x28, 0x09, 0x61))

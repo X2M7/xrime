@@ -8,6 +8,8 @@ package com.osfans.trime.ime.keyboard
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Canvas
+import android.graphics.Typeface
+import android.os.SystemClock
 import android.view.KeyEvent
 import android.widget.FrameLayout
 import androidx.core.view.children
@@ -36,6 +38,13 @@ class KeyboardView(
     internal val keyTextSize = theme.style.keyTextSize
     internal val keyLongTextSize = theme.style.keyLongTextSize.takeIf { it > 0 } ?: keyTextSize
     internal val symbolTextSize = theme.style.symbolTextSize.takeIf { it > 0 } ?: keyTextSize
+    internal data class Fonts(val key: Typeface, val symbol: Typeface)
+    private val fontSnapshot = ExpiringKeyboardFontSnapshot(
+        intervalMillis = 1_000,
+        now = SystemClock::uptimeMillis,
+        load = { Fonts(theme.fonts.key, theme.fonts.symbol) },
+    )
+    internal fun fonts(): Fonts = fontSnapshot.get()
     internal val popupOnKeyPress by AppPrefs.defaultInstance().keyboard.popupOnKeyPress
     internal val hookShiftArrow: Boolean by AppPrefs.defaultInstance().keyboard.hookShiftArrow
     internal val hookShiftLock: Boolean by AppPrefs.defaultInstance().keyboard.hookShiftLock
@@ -65,8 +74,8 @@ class KeyboardView(
         setPadding(
             keyboard.horizontalGap / 2 + key.extraWidthLeft,
             keyboard.verticalGap / 2,
-            keyboard.horizontalGap / 2 + key.extraWidthRight,
-            keyboard.verticalGap / 2,
+            keyboard.horizontalGap - keyboard.horizontalGap / 2 + key.extraWidthRight,
+            keyboard.verticalGap - keyboard.verticalGap / 2,
         )
     }
 

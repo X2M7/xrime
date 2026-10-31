@@ -115,16 +115,17 @@ class ThemeGoldenTest :
 
                 Then("color schemes and preset keys are decoded") {
                     theme.presetColorSchemes.size shouldBe 37
-                    theme.presetKeys.size shouldBe 123
+                    theme.presetKeys.size shouldBe 125
                     val brightnessDown = theme.presetKeys.getValue("BRIGHTNESS_DOWN")
                     brightnessDown.label shouldBe "亮度-"
                     brightnessDown.send shouldBe "BRIGHTNESS_DOWN"
                 }
 
-                Then("all 19 keyboards are decoded with their keys") {
-                    theme.presetKeyboards.size shouldBe 19
+                Then("all 21 keyboards are decoded with their keys") {
+                    theme.presetKeyboards.size shouldBe 21
                     theme.presetKeyboards shouldContainKey "default"
                     theme.presetKeyboards shouldContainKey "qwerty0"
+                    theme.presetKeyboards shouldContainKey "qwerty_ascii"
                     theme.presetKeyboards shouldContainKey "cangjie5"
                     theme.presetKeyboards shouldContainKey "array30"
 
@@ -144,6 +145,22 @@ class ThemeGoldenTest :
                     qwerty0.labelTransform shouldBe TextKeyboard.LabelTransform.UPPERCASE
                 }
 
+                Then("the text editing panel contains real actions and returns to the previous keyboard") {
+                    val panel = theme.presetKeyboards.getValue("xrime_text_editor")
+                    panel.width shouldBe 20f
+                    panel.height shouldBe 44f
+                    panel.keys.map { it.click } shouldBe listOf(
+                        "select_all", "Home", "Up", "End", "clipboard_window",
+                        "cut", "Left", "Down", "Right", "copy",
+                        "paste", "undo", "Tab", "redo", "BackSpace", "Keyboard_return",
+                    ).map { KeyActionToken.Plain(it) }
+                    panel.keys.single { it.click == KeyActionToken.Plain("copy") }.longClick shouldBe KeyActionToken.Plain("private_copy")
+                    panel.keys.last().width shouldBe 100f
+                    theme.presetKeys.getValue("Keyboard_return").select shouldBe ".return"
+                    theme.presetKeys.getValue("clipboard_window").command shouldBe "clipboard_window"
+                    theme.presetKeys.getValue("private_copy").command shouldBe "private_copy"
+                }
+
                 Then("the letter keyboard reuses default keys and preserves its mode overrides") {
                     val letter = theme.presetKeyboards.getValue("letter")
                     val default = theme.presetKeyboards.getValue("default")
@@ -155,6 +172,38 @@ class ThemeGoldenTest :
                     letter.height shouldBe default.height
                     letter.keys.size shouldBe default.keys.size
                     letter.keys.first().click shouldBe default.keys.first().click
+                }
+
+                Then("the 26-key English layout preserves the Chinese layout's keys and geometry") {
+                    val chinese = theme.presetKeyboards.getValue("qwerty")
+                    val english = theme.presetKeyboards.getValue("qwerty_ascii")
+                    chinese.asciiMode shouldBe 0
+                    chinese.asciiKeyboard shouldBe "qwerty_ascii"
+                    english.asciiMode shouldBe 1
+                    english.resetAsciiMode shouldBe true
+                    english.keys shouldBe chinese.keys
+                    english.width shouldBe chinese.width
+                    english.height shouldBe chinese.height
+                    english.columns shouldBe chinese.columns
+                    english.keyTextOffsetX shouldBe chinese.keyTextOffsetX
+                    english.keyTextOffsetY shouldBe chinese.keyTextOffsetY
+                    english.keySymbolOffsetX shouldBe chinese.keySymbolOffsetX
+                    english.keySymbolOffsetY shouldBe chinese.keySymbolOffsetY
+                    english.keyHintOffsetX shouldBe chinese.keyHintOffsetX
+                    english.keyHintOffsetY shouldBe chinese.keyHintOffsetY
+                    english.keyPressOffsetX shouldBe chinese.keyPressOffsetX
+                    english.keyPressOffsetY shouldBe chinese.keyPressOffsetY
+                    english.keys.single { it.click == KeyActionToken.Plain("Mode_switch") }.longClick shouldBe
+                        KeyActionToken.Plain("Menu")
+                }
+
+                Then("the timestamp gesture is available on the standard full keyboards") {
+                    val timestamp = theme.presetKeys.getValue("TimestampISO8601")
+                    timestamp.command shouldBe "date_iso8601"
+                    listOf("default", "letter", "qwerty", "qwerty_ascii").forEach { name ->
+                        val b = theme.presetKeyboards.getValue(name).keys.single { it.click == KeyActionToken.Plain("b") }
+                        b.swipeDown shouldBe KeyActionToken.Plain("TimestampISO8601")
+                    }
                 }
 
                 Then("the scj6 alias preserves the complete cangjie5 keyboard") {
@@ -174,7 +223,7 @@ class ThemeGoldenTest :
                 val theme = ThemeTestSupport.decodeBuiltinTheme(name)
                 fun key(layout: String, click: String): TextKeyboard.TextKey = theme.presetKeyboards.getValue(layout).keys.single { it.click == KeyActionToken.Plain(click) }
 
-                Then("$name defines three distinct navigation commands without adding layouts") {
+                Then("$name defines three distinct navigation commands and the expected layouts") {
                     mapOf("Keyboard_ascii" to ".ascii", "Keyboard_native" to ".native", "Keyboard_return" to ".return")
                         .forEach { (action, target) ->
                             val preset = theme.presetKeys.getValue(action)
@@ -185,8 +234,16 @@ class ThemeGoldenTest :
                     theme.presetKeys.getValue("Keyboard_ascii").label shouldBe "EN"
                     theme.presetKeys.getValue("Keyboard_native").label shouldBe "中文"
                     theme.presetKeys.getValue("Keyboard_return").label shouldBe "返回"
-                    theme.presetKeyboards.size shouldBe if (name == "trime.yaml") 19 else 51
-                    theme.presetKeys.size shouldBe if (name == "trime.yaml") 123 else 257
+                    theme.presetKeyboards.size shouldBe if (name == "trime.yaml") 21 else 51
+                    theme.presetKeys.size shouldBe if (name == "trime.yaml") 125 else 258
+                    theme.presetKeys.getValue("private_copy").command shouldBe "private_copy"
+                    val panel = if (name == "trime.yaml") "xrime_text_editor" else "editor"
+                    key(panel, "copy").longClick shouldBe KeyActionToken.Plain("private_copy")
+                }
+
+                Then("$name opens xrime rather than another installed Trime") {
+                    theme.presetKeys.getValue("TrimeApp").option shouldBe "com.x2m7.xrime"
+                    theme.presetKeys.getValue("TrimeCmp").option shouldBe "com.x2m7.xrime/com.osfans.trime.ui.main.MainActivity"
                 }
 
                 Then("$name exposes English on the real T9 number key and preserves Chinese punctuation") {

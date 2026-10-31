@@ -4,34 +4,59 @@
 package com.osfans.trime.data.userdict
 
 import java.io.File
+import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.io.InputStreamReader
+import java.io.OutputStream
 import java.nio.charset.CodingErrorAction
+
+internal class DictionarySizeLimitException(message: String = "Dictionary file is too large") : IOException(message)
 
 internal object DictionaryTextFormats {
     const val MAX_IMPORT_BYTES = 32L * 1024 * 1024
     const val MAX_PHRASE_BYTES = 256L * 1024
+    private const val MAX_EMPTY_READS = 16
 
-    fun copyBounded(input: InputStream, destination: File, limit: Long = MAX_IMPORT_BYTES) {
-        destination.outputStream().use { output ->
-            val buffer = ByteArray(64 * 1024)
-            var copied = 0L
-            while (true) {
-                val count = input.read(buffer)
-                if (count < 0) break
-                copied += count
-                if (copied > limit) throw IOException("Dictionary file is too large")
-                output.write(buffer, 0, count)
+    fun copyBounded(input: InputStream, destination: File, limit: Long = MAX_IMPORT_BYTES, checkActive: () -> Unit = {}) {
+        destination.outputStream().use { output -> copyBounded(input, output, limit, checkActive) }
+    }
+
+    fun readBounded(input: InputStream, limit: Long): ByteArray = ByteArrayOutputStream().use { output ->
+        copyBounded(input, output, limit) {}
+        output.toByteArray()
+    }
+
+    fun copyBounded(input: InputStream, output: OutputStream, limit: Long, checkActive: () -> Unit) {
+        require(limit >= 0)
+        val buffer = ByteArray(64 * 1024)
+        var copied = 0L
+        var emptyReads = 0
+        while (true) {
+            checkActive()
+            if (Thread.currentThread().isInterrupted) throw java.util.concurrent.CancellationException("Dictionary read interrupted")
+            val count = input.read(buffer)
+            checkActive()
+            if (Thread.currentThread().isInterrupted) throw java.util.concurrent.CancellationException("Dictionary read interrupted")
+            if (count < 0) break
+            if (count == 0) {
+                if (++emptyReads > MAX_EMPTY_READS) throw IOException("Dictionary source made no read progress")
+                continue
             }
+            emptyReads = 0
+            if (count.toLong() > limit - copied) throw DictionarySizeLimitException()
+            copied += count
+            output.write(buffer, 0, count)
         }
     }
 
-    private fun lines(file: File, block: (String, Int) -> Unit) {
+    private fun lines(file: File, block: (String, Int) -> Unit) = lines(file.inputStream(), block)
+
+    private fun lines(input: InputStream, block: (String, Int) -> Unit) {
         val decoder = Charsets.UTF_8.newDecoder()
             .onMalformedInput(CodingErrorAction.REPORT)
             .onUnmappableCharacter(CodingErrorAction.REPORT)
-        InputStreamReader(file.inputStream(), decoder).buffered().use { reader ->
+        InputStreamReader(input, decoder).buffered().use { reader ->
             var number = 0
             val line = StringBuilder()
             val buffer = CharArray(4096)
@@ -60,10 +85,14 @@ internal object DictionaryTextFormats {
     }
 
     /** Same phrase/code/weight column order as Rime TableDb; refuse silently skipped rows. */
-    fun validateTable(file: File): Int {
+    fun validateTable(file: File): Int = validateTable(file.inputStream())
+
+    fun validateTable(bytes: ByteArray): Int = validateTable(bytes.inputStream())
+
+    private fun validateTable(input: InputStream): Int {
         var count = 0
         var comments = true
-        lines(file) { line, number ->
+        lines(input) { line, number ->
             when {
                 line.isEmpty() -> Unit
 

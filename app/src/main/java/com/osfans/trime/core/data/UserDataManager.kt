@@ -129,7 +129,7 @@ object UserDataManager {
 
         suspend fun supportsRename(uri: Uri): Boolean
 
-        suspend fun digest(uri: Uri): ByteArray
+        suspend fun digest(uri: Uri, maxBytes: Long): ByteArray
     }
 
     private object StorageExternalFileOperations : ExternalFileOperations {
@@ -165,7 +165,10 @@ object UserDataManager {
                 cursor.getInt(0) and DocumentsContract.Document.FLAG_SUPPORTS_RENAME != 0
             } ?: error("Cannot query document: $uri")
 
-        override suspend fun digest(uri: Uri): ByteArray = StorageAccess.readFile(uri) { SyncFingerprint.digest(it) }
+        override suspend fun digest(uri: Uri, maxBytes: Long): ByteArray {
+            val context = currentCoroutineContext()
+            return StorageAccess.readFile(uri) { SyncFingerprint.digest(it, maxBytes) { context.ensureActive() } }
+        }
     }
 
     /** Internal rime directories that never take part in the sync. */
@@ -486,10 +489,8 @@ object UserDataManager {
                     FileOutputStream(staged).use { output ->
                         val buffer = ByteArray(SyncFingerprint.BUFFER_SIZE)
                         while (true) {
-                            importContext.ensureActive()
-                            val count = input.read(buffer)
+                            val count = SyncFingerprint.readWithProgress(input, buffer) { importContext.ensureActive() }
                             if (count < 0) break
-                            if (count == 0) continue
                             bytes += count
                             totalBytes += count
                             check(totalBytes <= LocalImportTransaction.MAX_STAGED_BYTES) { "Import exceeds its 512 MiB disk budget" }
@@ -1076,7 +1077,7 @@ object UserDataManager {
         check(document.length <= 0 || document.length == expectedBytes) {
             "Document read-back length mismatch: ${document.name}"
         }
-        val actual = operations.digest(document.uri)
+        val actual = operations.digest(document.uri, expectedBytes)
         check(SyncFingerprint.hex(actual) == expectedSha256) {
             "Document read-back digest mismatch: ${document.name}"
         }
@@ -1353,7 +1354,9 @@ object UserDataManager {
     ): List<StorageWalkEntry> {
         val rootId = DocumentsContract.getTreeDocumentId(treeUri)
         require(rootId.isNotEmpty()) { "External tree has no root document ID" }
+        require(rootId.length <= SafListingBudget.MAX_ID_CHARS) { "External tree has an oversized document ID" }
         val entries = mutableListOf<StorageWalkEntry>()
+        val budget = SafListingBudget()
         val visitedDocumentIds = mutableSetOf(rootId)
         val visitedPaths = mutableSetOf<String>()
         val pendingDirectories = ArrayDeque<ExternalDirectory>()
@@ -1384,13 +1387,14 @@ object UserDataManager {
                 while (it.moveToNext()) {
                     val documentId = it.getString(idColumn)
                     require(!documentId.isNullOrEmpty()) { "External entry has no document ID" }
+                    val name = it.getString(nameColumn)
+                    val mimeType = it.getString(mimeColumn)
+                    budget.accept(documentId, name, mimeType, directory.relativePath)
                     check(visitedDocumentIds.add(documentId)) {
                         "External tree contains repeated document ID: $documentId"
                     }
                     check(visitedDocumentIds.size <= MAX_EXTERNAL_ENTRIES) { "External tree exceeds $MAX_EXTERNAL_ENTRIES entries" }
-                    val name = it.getString(nameColumn)
                     SyncRelativePath.requireSafeName(name)
-                    val mimeType = it.getString(mimeColumn)
                     require(!mimeType.isNullOrEmpty()) { "External entry has no MIME type: $documentId" }
                     val relativePath =
                         if (directory.relativePath.isEmpty()) name else "${directory.relativePath}/$name"

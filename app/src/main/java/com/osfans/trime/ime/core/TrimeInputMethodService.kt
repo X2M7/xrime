@@ -7,6 +7,7 @@ package com.osfans.trime.ime.core
 
 import android.annotation.SuppressLint
 import android.app.Dialog
+import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
@@ -14,9 +15,11 @@ import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Region
 import android.inputmethodservice.InputMethodService
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Looper
+import android.os.Process
 import android.os.SystemClock
 import android.text.InputType
 import android.view.Gravity
@@ -32,6 +35,7 @@ import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.ExtractedTextRequest
 import android.view.inputmethod.InlineSuggestionsRequest
 import android.view.inputmethod.InlineSuggestionsResponse
+import android.view.inputmethod.InputConnection
 import android.widget.FrameLayout
 import androidx.annotation.Keep
 import androidx.annotation.RequiresApi
@@ -40,6 +44,7 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.doOnAttach
 import androidx.core.view.updateLayoutParams
+import androidx.core.view.inputmethod.EditorInfoCompat
 import androidx.lifecycle.lifecycleScope
 import com.osfans.trime.R
 import com.osfans.trime.TrimeApplication
@@ -47,6 +52,7 @@ import com.osfans.trime.core.CandidateSnapshot
 import com.osfans.trime.core.KeyModifiers
 import com.osfans.trime.core.KeyValue
 import com.osfans.trime.core.RimeApi
+import com.osfans.trime.core.RimeInputAdmissionContext
 import com.osfans.trime.core.RimeKeyMapping
 import com.osfans.trime.core.RimeLifecycle
 import com.osfans.trime.core.RimeMessage
@@ -54,6 +60,13 @@ import com.osfans.trime.core.compositionForEditor
 import com.osfans.trime.daemon.RimeDaemon
 import com.osfans.trime.daemon.RimeSession
 import com.osfans.trime.data.db.ClipboardHelper
+import com.osfans.trime.data.db.ClipboardRepeatState
+import com.osfans.trime.data.db.clipboardRepeatDigest
+import com.osfans.trime.data.db.ClipboardImagePayload
+import com.osfans.trime.data.db.ClipboardImageRepository
+import com.osfans.trime.data.db.ImageSendLease
+import com.osfans.trime.data.db.PersistencePermitExpiredException
+import com.osfans.trime.data.db.PrivateCopyHistoryTicket
 import com.osfans.trime.data.prefs.AppPrefs
 import com.osfans.trime.data.prefs.PreferenceDelegate
 import com.osfans.trime.data.prefs.PreferenceDelegateProvider
@@ -61,7 +74,17 @@ import com.osfans.trime.data.theme.ColorManager
 import com.osfans.trime.data.theme.ThemeManager
 import com.osfans.trime.data.theme.ThemeScope
 import com.osfans.trime.ime.composition.CandidatesView
+import com.osfans.trime.ime.clipboard.ClipboardSearchInputConnection
+import com.osfans.trime.ime.clipboard.ClipboardImageCommitApi25
+import com.osfans.trime.ime.clipboard.ClipboardImageDispatchGate
+import com.osfans.trime.ime.clipboard.acceptsClipboardImageMime
+import com.osfans.trime.ime.clipboard.ClipboardSearchResults
+import com.osfans.trime.ime.clipboard.ClipboardSearchPasteGate
+import com.osfans.trime.ime.clipboard.ClipboardSearchSession
+import com.osfans.trime.ime.clipboard.clipboardSearchKeyAllowed
+import com.osfans.trime.ime.clipboard.awaitClipboardSearchBind
 import com.osfans.trime.ime.keyboard.InputFeedbackManager
+import com.osfans.trime.ime.keyboard.ClipboardSearchKeyboardSnapshot
 import com.osfans.trime.ime.performance.InputLatencyLog
 import com.osfans.trime.receiver.RimeIntentReceiver
 import com.osfans.trime.util.any
@@ -74,16 +97,24 @@ import com.osfans.trime.util.virtualKeyCharacterMap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.asContextElement
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.consumeEach
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import splitties.bitflags.hasFlag
 import splitties.systemservices.clipboardManager
 import splitties.systemservices.inputMethodManager
 import timber.log.Timber
+import java.util.concurrent.atomic.AtomicBoolean
 
 private const val DESTROY_EDITOR_CLEANUP_TIMEOUT_MS = 45_000L
 
@@ -105,6 +136,621 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
     private var themeInitialization: Job? = null
     private var loadingPanel: FrameLayout? = null
     private var startupFailed = false
+    private val inputAdmissions = RimeInputAdmissionRegistry()
+    private val serviceMessageConsumer = inputAdmissions.register()
+    @Volatile private var searchInputFrozen = false
+    @Volatile private var inputDrainGeneration = 0L
+    private var imageSendDispatchGate: ClipboardImageDispatchGate? = null
+    private var privateCopyTicket: PrivateCopyHistoryTicket? = null
+    private var privateCopyJob: Job? = null
+    private var repeatClipboardJob: Job? = null
+    private var consumedClipboardShortcut = false
+    private data class ImageDispatchContext(
+        val connection: InputConnection,
+        val owner: Long,
+        val epoch: Long,
+        val gate: ClipboardImageDispatchGate,
+        val pageAllowed: () -> Boolean,
+    )
+    private val imageDispatchContext = ThreadLocal<ImageDispatchContext>()
+    internal val isSearchInputFrozen: Boolean get() = searchInputFrozen
+
+    internal fun allowInputAction(): Boolean {
+        val origin = RimeInputAdmissionContext.current.get()
+        return if (origin == null) !searchInputFrozen else inputAdmissions.allows(origin)
+    }
+
+    private fun abortSearchDrain() {
+        imageSendDispatchGate?.cancelBeforeClaim()
+        privateCopyTicket?.cancel()
+        if (!searchInputFrozen) return
+        inputDrainGeneration++
+        if (!inputAdmissions.thaw()) inputAdmissions.reset()
+        searchInputFrozen = false
+    }
+
+    /** Untagged or stale messages cannot revive a local search editor or escape into its owner. */
+    internal fun prepareInputMessage(message: RimeMessage<*>): Boolean {
+        if (message.isRejectedForClipboardSearch()) return false
+        val origin = message.inputAdmission.takeIf { it != 0L }
+        if (inputAdmissions.allows(origin)) return true
+        val phase = clipboardSearch.phase
+        if (phase == ClipboardSearchSession.Phase.ENTERING || phase == ClipboardSearchSession.Phase.EDITING ||
+            phase == ClipboardSearchSession.Phase.RESTORING
+        ) {
+            if (message.rejectForClipboardSearch()) {
+                val task = clipboardSearchJob
+                recoverClipboardSearch(privacyOwner, editorToken, clipboardSearchGeneration)
+                task?.cancel()
+            }
+            return false
+        }
+        if (searchInputFrozen) abortSearchDrain()
+        // An old input chain stays invalid even after search has returned to the
+        // ordinary editor. Option/schema notifications can also change the UI.
+        // Both subscribers share this object, so remember the rejection.
+        if (origin != null) {
+            message.rejectForClipboardSearch()
+            return false
+        }
+        return !message.isRejectedForClipboardSearch()
+    }
+
+    /** Freeze new input, drain accepted jobs, then confirm an ordered marker with every consumer. */
+    internal suspend fun drainForSearch(expectedEditor: Long): Boolean {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        if (searchInputFrozen || !isCurrentEditor(expectedEditor) || isPrivacyModeActive || PrivacyModeState.active) return false
+        searchInputFrozen = true
+        inputDrainGeneration++
+        if (!inputAdmissions.freeze()) {
+            searchInputFrozen = false
+            return false
+        }
+        var drained = false
+        try {
+            drained = withTimeoutOrNull(4_000) {
+                while (searchInputFrozen && isCurrentEditor(expectedEditor) && !isPrivacyModeActive && !PrivacyModeState.active) {
+                    if (inputAdmissions.outcome() == RimeInputDrain.Ack.ABORTED) return@withTimeoutOrNull false
+                    val marker = inputAdmissions.nextMarker()
+                    if (marker == null) {
+                        delay(10)
+                        continue
+                    }
+                    val queued = postJob(lifecycleScope) {
+                        if (isCurrentEditor(expectedEditor)) rime.runOnReady {
+                            publishInputBarrier(marker.epoch, marker.sequence)
+                        }
+                    }
+                    try {
+                        queued.join()
+                        if (queued.isCancelled) return@withTimeoutOrNull false
+                    } finally {
+                        // This job belongs to the service scope, not the timeout's scope.
+                        if (!queued.isCompleted) queued.cancel()
+                    }
+                    while (searchInputFrozen && inputAdmissions.outcome() == RimeInputDrain.Ack.WAIT) delay(10)
+                    when (inputAdmissions.outcome()) {
+                        RimeInputDrain.Ack.COMPLETE -> return@withTimeoutOrNull true
+                        RimeInputDrain.Ack.ABORTED -> return@withTimeoutOrNull false
+                        RimeInputDrain.Ack.RETRY, RimeInputDrain.Ack.WAIT -> Unit
+                    }
+                }
+                false
+            } ?: false
+            return drained
+        } finally {
+            if (!drained) abortSearchDrain()
+        }
+    }
+
+    /** Called only after a successful drain or an editor boundary has invalidated old work. */
+    internal fun releaseSearchDrain() {
+        if (!searchInputFrozen) return
+        inputDrainGeneration++
+        inputAdmissions.reset()
+        searchInputFrozen = false
+    }
+
+    private var clipboardImageSendJob: Job? = null
+
+    /** Copy the current selection directly to private history without touching the system clipboard. */
+    internal fun copySelectionPrivately(
+        sourceCurrent: () -> Boolean = { true },
+        registerCancellation: ((() -> Unit) -> Unit)? = null,
+    ) {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        val repeatEvent = ClipboardHelper.invalidateRepeat()
+        if (privateCopyJob?.isActive == true || searchInputFrozen ||
+            clipboardSearch.phase != ClipboardSearchSession.Phase.INACTIVE || !allowInputAction() ||
+            !canReadEditorContent() || !sourceCurrent()
+        ) {
+            toast(R.string.private_copy_unavailable)
+            return
+        }
+        val owner = editorToken
+        val epoch = PrivacyModeState.observeOrdinaryPersistence() ?: return
+        val connection = super.getCurrentInputConnection() ?: return
+        val ticket = ClipboardHelper.acquirePrivateCopyTicket() ?: run {
+            toast(R.string.private_copy_unavailable)
+            return
+        }
+        val request = lifecycleScope.launch(start = CoroutineStart.LAZY) {
+            val job = checkNotNull(currentCoroutineContext()[Job])
+            try {
+                val selected = withContext(Dispatchers.IO) {
+                    if (!PrivacyModeState.claimIfOrdinaryEpoch(epoch) {
+                            job.isActive && editorToken == owner && sourceCurrent() && ticket.claimRead()
+                        }
+                    ) return@withContext null
+                    connection.getSelectedText(0)
+                }
+                if (!job.isActive || !isCurrentEditor(owner) || !sourceCurrent() || !PrivacyModeState.isOrdinaryEpoch(epoch)) return@launch
+                if (selected == null || selected.isEmpty()) {
+                    toast(R.string.private_copy_unavailable)
+                    return@launch
+                }
+                if (selected.length > 65536) {
+                    toast(R.string.private_copy_too_large)
+                    return@launch
+                }
+                val text = selected.toString()
+                if (text.isEmpty() || text.length > 65536) {
+                    toast(if (text.length > 65536) R.string.private_copy_too_large else R.string.private_copy_unavailable)
+                    return@launch
+                }
+                val saved = ClipboardHelper.savePrivateCopy(text, epoch, ticket, repeatEvent) {
+                    job.isActive && editorToken == owner && sourceCurrent()
+                }
+                if (isCurrentEditor(owner) && sourceCurrent() && PrivacyModeState.isOrdinaryEpoch(epoch)) {
+                    toast(if (saved) R.string.private_copy_saved else R.string.private_copy_unavailable)
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                if (isCurrentEditor(owner) && sourceCurrent() && PrivacyModeState.isOrdinaryEpoch(epoch)) toast(R.string.private_copy_unavailable)
+            } finally {
+                ticket.cancel()
+            }
+        }
+        privateCopyTicket = ticket
+        privateCopyJob = request
+        registerCancellation?.invoke {
+            ticket.cancel()
+        }
+        request.invokeOnCompletion {
+            ClipboardHelper.releasePrivateCopyTicket(ticket)
+            ContextCompat.getMainExecutor(this).execute {
+                if (privateCopyJob === request) {
+                    privateCopyJob = null
+                    privateCopyTicket = null
+                }
+            }
+        }
+        request.start()
+    }
+
+    /** Send only to the currently bound external editor; never use the system clipboard. */
+    internal fun sendClipboardImage(
+        repository: ClipboardImageRepository,
+        image: ClipboardImagePayload,
+        pageCurrent: () -> Boolean,
+        backgroundAllowed: () -> Boolean,
+        dispatchGate: ClipboardImageDispatchGate,
+        afterSend: () -> Unit,
+    ): Boolean {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        if (clipboardImageSendJob?.isActive == true || !pageCurrent() || searchInputFrozen || isClipboardSearchEditing) return false
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N_MR1 || !canReadEditorContent()) {
+            toast(R.string.clipboard_image_target_unsupported)
+            return false
+        }
+        val owner = editorToken
+        val epoch = PrivacyModeState.observeOrdinaryPersistence() ?: return false
+        val editor = currentInputEditorInfo ?: return false
+        val targetPackage = editor.packageName?.takeIf { it.isNotBlank() } ?: return false
+        val targetUid = currentInputBinding?.uid ?: return false
+        if (targetUid == Process.myUid()) {
+            toast(R.string.clipboard_image_target_unsupported)
+            return false
+        }
+        @Suppress("DEPRECATION")
+        val packageUid = try { packageManager.getApplicationInfo(targetPackage, 0).uid } catch (_: Exception) { return false }
+        if (packageUid != targetUid || !acceptsClipboardImageMime(image.mimeType) { EditorInfoCompat.getContentMimeTypes(editor) }) {
+            toast(R.string.clipboard_image_target_unsupported)
+            return false
+        }
+        val request = lifecycleScope.launch(start = CoroutineStart.LAZY) {
+            val requestJob = checkNotNull(currentCoroutineContext()[Job])
+            var drain: Long? = null
+            var lease: ImageSendLease? = null
+            var uri: Uri? = null
+            var grantAttempted = false
+            fun backgroundValid(): Boolean = requestJob.isActive && editorToken == owner &&
+                PrivacyModeState.observeOrdinaryPersistence() == epoch && backgroundAllowed()
+            fun current(requireDrain: Boolean): Boolean {
+                val info = currentInputEditorInfo ?: return false
+                if (!requestJob.isActive || !pageCurrent() || !isCurrentEditor(owner) || !isInputViewShown ||
+                    isPrivacyModeActive || PrivacyModeState.observeOrdinaryPersistence() != epoch ||
+                    clipboardSearch.phase != ClipboardSearchSession.Phase.INACTIVE ||
+                    info.packageName != targetPackage || currentInputBinding?.uid != targetUid ||
+                    !acceptsClipboardImageMime(image.mimeType) { EditorInfoCompat.getContentMimeTypes(info) }
+                ) return false
+                return if (requireDrain) searchInputFrozen && drain == inputDrainGeneration else !searchInputFrozen
+            }
+            try {
+                if (!current(false) || !drainForSearch(owner)) return@launch
+                drain = inputDrainGeneration
+                if (!current(true)) return@launch
+                if (rime.run { statusCached.isComposing } || composingText.isNotEmpty()) {
+                    toast(R.string.clipboard_image_composition_pending)
+                    return@launch
+                }
+                // Keep the lease result reachable across cancellation; repository checks the
+                // original request and owner while it performs bounded IO under its lock.
+                lease = withContext(NonCancellable) {
+                    repository.createSendLease(image.id, targetUid) {
+                        if (!backgroundValid()) throw PersistencePermitExpiredException()
+                    }
+                }
+                currentCoroutineContext().ensureActive()
+                if (!current(true)) return@launch
+                val token = checkNotNull(lease).token
+                val contentUri = Uri.Builder().scheme("content").authority("$packageName.clipboard-image")
+                    .appendPath("send").appendPath(token).build()
+                uri = contentUri
+                grantAttempted = true
+                grantUriPermission(targetPackage, contentUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                if (!current(true)) return@launch
+                val connection = super.getCurrentInputConnection() ?: return@launch
+                if (!current(true)) return@launch
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N_MR1) return@launch
+                val accepted = withContext(Dispatchers.IO) {
+                    val claimed = PrivacyModeState.claimIfOrdinaryEpoch(epoch) {
+                        backgroundValid() && dispatchGate.tryClaim()
+                    }
+                    if (!claimed) return@withContext false
+                    imageDispatchContext.set(ImageDispatchContext(connection, owner, epoch, dispatchGate, ::backgroundValid))
+                    try {
+                        // Once claimed, Binder may have delivered even if the result is false.
+                        ClipboardImageCommitApi25.dispatch(connection, contentUri, image.mimeType)
+                    } finally {
+                        imageDispatchContext.remove()
+                    }
+                }
+                if (accepted && current(true)) {
+                    releaseSearchDrain()
+                    drain = null
+                    if (current(false)) afterSend()
+                } else if (current(true)) toast(R.string.clipboard_image_send_failed)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: PersistencePermitExpiredException) {
+                // A page, editor or privacy boundary invalidated the operation.
+            } catch (_: Exception) {
+                if (isCurrentEditor(owner) && pageCurrent()) toast(R.string.clipboard_image_send_failed)
+            } finally {
+                if (drain != null && searchInputFrozen && inputDrainGeneration == drain) releaseSearchDrain()
+                val token = lease?.token
+                dispatchGate.cancelBeforeClaim()
+                if (!dispatchGate.mayHaveDispatched && token != null) withContext(NonCancellable) {
+                    try {
+                        if (grantAttempted && uri != null) revokeUriPermission(checkNotNull(uri), Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        repository.revokeSendLease(token, targetUid)
+                    } catch (_: Exception) {
+                        // A retained bounded lease is safer than revoking before its URI grant.
+                    }
+                }
+            }
+        }
+        clipboardImageSendJob = request
+        imageSendDispatchGate = dispatchGate
+        request.invokeOnCompletion {
+            ContextCompat.getMainExecutor(this).execute {
+                if (clipboardImageSendJob === request) clipboardImageSendJob = null
+                if (imageSendDispatchGate === dispatchGate) imageSendDispatchGate = null
+            }
+        }
+        request.start()
+        return true
+    }
+
+    private val clipboardSearch = ClipboardSearchSession()
+    @Volatile private var clipboardSearchConnection: ClipboardSearchInputConnection? = null
+    private var clipboardSearchJob: Job? = null
+    private val clipboardSearchPasteGate = ClipboardSearchPasteGate()
+    private var clipboardSearchGeneration = 0L
+
+    private fun nextClipboardSearchGeneration(): Long {
+        check(clipboardSearchGeneration < Long.MAX_VALUE)
+        return ++clipboardSearchGeneration
+    }
+    private var clipboardSearchOriginalAscii = false
+    private var clipboardSearchKeyboard: ClipboardSearchKeyboardSnapshot? = null
+
+    internal val isClipboardSearchEditing: Boolean
+        get() = clipboardSearch.phase == ClipboardSearchSession.Phase.EDITING
+
+    internal fun isClipboardSearchKeyAllowed(code: Int, metaState: Int): Boolean = clipboardSearchKeyAllowed(code, metaState)
+
+    override fun getCurrentInputConnection(): InputConnection? {
+        imageDispatchContext.get()?.let { dispatch ->
+            return dispatch.connection.takeIf {
+                dispatch.gate.mayHaveDispatched && editorToken == dispatch.owner &&
+                    PrivacyModeState.isOrdinaryEpoch(dispatch.epoch) && dispatch.pageAllowed()
+            }
+        }
+        val origin = RimeInputAdmissionContext.current.get()
+        if ((searchInputFrozen && origin == null) || (origin != null && !inputAdmissions.allows(origin))) return null
+        return when (clipboardSearch.phase) {
+            ClipboardSearchSession.Phase.ENTERING, ClipboardSearchSession.Phase.RESTORING -> null
+            ClipboardSearchSession.Phase.EDITING -> clipboardSearchConnection
+            else -> super.getCurrentInputConnection()
+        }
+    }
+
+    /** Clear local content before a real editor/privacy lifecycle boundary. */
+    private fun discardClipboardSearch(): Boolean {
+        nextClipboardSearchGeneration()
+        val phase = clipboardSearch.phase
+        val wasActive = phase != ClipboardSearchSession.Phase.INACTIVE
+        val hadLocal = phase == ClipboardSearchSession.Phase.ENTERING || phase == ClipboardSearchSession.Phase.EDITING ||
+            phase == ClipboardSearchSession.Phase.RESTORING
+        if (hadLocal) {
+            // Revoke the local editor before exposing the physical connection to any old work.
+            searchInputFrozen = true
+            editorOwnership.add(editorGeneration.advance())
+            nativeBoundEditorToken = 0L
+            inputAdmissions.reset()
+        }
+        try {
+            clipboardSearch.close()
+            clipboardSearchJob?.cancel()
+            clipboardSearchJob = null
+            clipboardSearchConnection?.dispose()
+            clipboardSearchConnection = null
+            val keyboard = clipboardSearchKeyboard
+            clipboardSearchKeyboard = null
+            runCatching { keyboard?.let { inputView?.restoreClipboardSearchKeyboard(it) } }
+            runCatching { inputView?.hideClipboardSearch() }
+            runCatching { inputView?.dismissClipboardSearchResults() }
+        } finally {
+            if (hadLocal) searchInputFrozen = false
+        }
+        return wasActive
+    }
+
+    private fun recoverClipboardSearch(owner: Long, logical: Long, generation: Long) {
+        if (generation != clipboardSearchGeneration || !isCurrentEditor(logical) || privacyOwner != owner) return
+        searchInputFrozen = true
+        editorOwnership.add(editorGeneration.advance())
+        nativeBoundEditorToken = 0L
+        inputAdmissions.reset()
+        try {
+            clipboardSearch.close()
+            clipboardSearchConnection?.dispose()
+            clipboardSearchConnection = null
+            val keyboard = clipboardSearchKeyboard
+            clipboardSearchKeyboard = null
+            keyboard?.let { inputView?.restoreClipboardSearchKeyboard(it) }
+            inputView?.hideClipboardSearch()
+        } catch (_: Exception) {
+            Timber.w("Unable to restore clipboard search view")
+        } finally {
+            searchInputFrozen = false
+            InputFeedbackManager.startInput(sensitive = privacyMode.active)
+            bindEditor()
+            postRimeJob { setRuntimeOption("ascii_mode", clipboardSearchOriginalAscii) }
+            toast(R.string.clipboard_search_unavailable)
+        }
+    }
+
+    internal fun beginClipboardSearch(initialQuery: String = "") {
+        if (clipboardSearchJob?.isActive == true || isPrivacyModeActive || PrivacyModeState.active || !editorActive) return
+        if (initialQuery.length > ClipboardSearchInputConnection.MAX_QUERY_UNITS) return
+        val owner = privacyOwner
+        val prior = editorToken
+        val generation = nextClipboardSearchGeneration()
+        clipboardSearchJob = lifecycleScope.launch {
+            var transitionLogical: Long? = null
+            var settled = false
+            try {
+                if (!drainForSearch(prior)) {
+                    if (isCurrentEditor(prior)) toast(R.string.clipboard_search_unavailable)
+                    return@launch
+                }
+                if (!isCurrentEditor(prior) || privacyOwner != owner || isPrivacyModeActive || PrivacyModeState.active) {
+                    releaseSearchDrain()
+                    return@launch
+                }
+                if (rime.run { statusCached.isComposing }) {
+                    releaseSearchDrain()
+                    toast(R.string.clipboard_search_finish_composition)
+                    return@launch
+                }
+                val targetView = inputView ?: run { releaseSearchDrain(); return@launch }
+                clipboardSearchOriginalAscii = rime.run { statusCached.isAsciiMode }
+                clipboardSearchKeyboard = targetView.captureClipboardSearchKeyboard()
+                clipboardSearch.close()
+                val logical = editorGeneration.advance()
+                transitionLogical = logical
+                editorOwnership.add(logical)
+                if (!clipboardSearch.begin(owner, logical, privateMode = false, composing = false)) {
+                    return@launch
+                }
+                lateinit var local: ClipboardSearchInputConnection
+                local = ClipboardSearchInputConnection(targetView) { update ->
+                    if (clipboardSearchConnection === local && local.accepts(update) && isCurrentEditor(logical) &&
+                        privacyOwner == owner && !isPrivacyModeActive && !PrivacyModeState.active && isClipboardSearchEditing
+                    ) {
+                        clipboardSearch.changed()
+                        inputView?.updateClipboardSearchQuery(update.text)
+                    }
+                }
+                clipboardSearchConnection = local
+                if (initialQuery.isNotEmpty() && !local.commitText(initialQuery, 1)) {
+                    return@launch
+                }
+                inputAdmissions.reset() // Keep physical input frozen until the search native editor is ready.
+                nativeBoundEditorToken = 0L
+                InputFeedbackManager.startInput(sensitive = true)
+                lastCommittedText = ""
+                composingText = ""
+                composingCursor = null
+                composingStart = null
+                selectionAfterCancel = null
+                var bound = false
+                val bind = postClipboardSearchBind {
+                    try {
+                        beginEditor(logical, false, true)
+                        if (isCurrentEditor(logical)) nativeBoundEditorToken = logical
+                        bound = true
+                    } catch (failure: CancellationException) {
+                        throw failure
+                    } catch (_: Exception) {
+                        Timber.w("Unable to bind clipboard search editor")
+                    }
+                }
+                if (!awaitClipboardSearchBind(bind) || !bound || !isCurrentEditor(logical) || privacyOwner != owner || isPrivacyModeActive || PrivacyModeState.active) {
+                    return@launch
+                }
+                clipboardSearch.ready(owner, logical, privateMode = false)
+                if (!isClipboardSearchEditing) {
+                    return@launch
+                }
+                searchInputFrozen = false
+                targetView.showClipboardSearch(onResults = { finishClipboardSearch(true) }, onCancel = { finishClipboardSearch(false) })
+                targetView.useClipboardSearchLanguage(clipboardSearchOriginalAscii)
+                targetView.updateClipboardSearchQuery(local.getExtractedText(null, 0)?.text?.toString().orEmpty())
+                settled = true
+            } catch (failure: CancellationException) {
+                throw failure
+            } catch (_: Exception) {
+                Timber.w("Clipboard search transition failed")
+            } finally {
+                if (!settled && generation == clipboardSearchGeneration) {
+                    transitionLogical?.let { recoverClipboardSearch(owner, it, generation) } ?: abortSearchDrain()
+                }
+            }
+        }
+    }
+
+    private fun finishClipboardSearch(showResults: Boolean) {
+        if (clipboardSearchJob?.isActive == true || !isClipboardSearchEditing) return
+        val owner = privacyOwner
+        val prior = editorToken
+        val local = clipboardSearchConnection ?: return
+        val generation = nextClipboardSearchGeneration()
+        clipboardSearchJob = lifecycleScope.launch {
+            var transitionLogical: Long? = null
+            var settled = false
+            try {
+                if (!drainForSearch(prior)) {
+                    if (isCurrentEditor(prior)) toast(R.string.clipboard_search_unavailable)
+                    return@launch
+                }
+                if (!isCurrentEditor(prior) || privacyOwner != owner || isPrivacyModeActive || PrivacyModeState.active) {
+                    releaseSearchDrain()
+                    return@launch
+                }
+                if (showResults && rime.run { statusCached.isComposing }) {
+                    releaseSearchDrain()
+                    toast(R.string.clipboard_search_finish_composition)
+                    return@launch
+                }
+                val query = local.getExtractedText(null, 0)?.text?.toString().orEmpty()
+                val ticket = clipboardSearch.changed() ?: run { releaseSearchDrain(); return@launch }
+                val logical = editorGeneration.advance()
+                transitionLogical = logical
+                editorOwnership.add(logical)
+                if (!clipboardSearch.restore(owner, logical, privateMode = false, results = showResults)) {
+                    return@launch
+                }
+                local.dispose()
+                clipboardSearchConnection = null
+                inputAdmissions.reset()
+                nativeBoundEditorToken = 0L
+                val info = currentInputEditorInfo ?: return@launch
+                var bound = false
+                val bind = postClipboardSearchBind {
+                    try {
+                        beginEditor(logical, info.inputType and InputType.TYPE_MASK_CLASS == InputType.TYPE_NULL, privacyMode.active)
+                        setRuntimeOption("ascii_mode", clipboardSearchOriginalAscii)
+                        if (isCurrentEditor(logical)) nativeBoundEditorToken = logical
+                        bound = true
+                    } catch (failure: CancellationException) {
+                        throw failure
+                    } catch (_: Exception) {
+                        Timber.w("Unable to restore clipboard search editor")
+                    }
+                }
+                if (!awaitClipboardSearchBind(bind) || !bound || !isCurrentEditor(logical) || privacyOwner != owner || isPrivacyModeActive || PrivacyModeState.active) {
+                    return@launch
+                }
+                clipboardSearch.restored(owner, logical, privateMode = false)
+                searchInputFrozen = false
+                InputFeedbackManager.startInput(sensitive = privacyMode.active)
+                clipboardSearchKeyboard?.let { inputView?.restoreClipboardSearchKeyboard(it) }
+                clipboardSearchKeyboard = null
+                if (showResults && clipboardSearch.phase == ClipboardSearchSession.Phase.RESULTS) {
+                    inputView?.showClipboardSearchResults(ClipboardSearchResults(query, ticket, owner, logical))
+                } else {
+                    inputView?.hideClipboardSearch()
+                }
+                settled = true
+            } catch (failure: CancellationException) {
+                throw failure
+            } catch (_: Exception) {
+                Timber.w("Clipboard search transition failed")
+            } finally {
+                if (!settled && generation == clipboardSearchGeneration) {
+                    transitionLogical?.let { recoverClipboardSearch(owner, it, generation) } ?: abortSearchDrain()
+                }
+            }
+        }
+    }
+
+    internal fun isClipboardSearchResultsCurrent(results: ClipboardSearchResults): Boolean =
+        isCurrentEditor(results.logicalEditor) && privacyOwner == results.physicalOwner &&
+            clipboardSearch.acceptsResult(results.ticket, results.physicalOwner, isPrivacyModeActive || PrivacyModeState.active)
+
+    internal fun clipboardSearchResultsDetached(results: ClipboardSearchResults) {
+        inputView?.forgetClipboardSearchResults(results)
+        if (clipboardSearch.acceptsResult(results.ticket, results.physicalOwner, isPrivacyModeActive || PrivacyModeState.active)) clipboardSearch.close()
+    }
+
+    internal fun pasteClipboardSearch(results: ClipboardSearchResults, id: Int, expectedText: String, afterPaste: () -> Unit) {
+        if (!allowInputAction() || !isCurrentEditor(results.logicalEditor) || privacyOwner != results.physicalOwner ||
+            !clipboardSearch.acceptsResult(results.ticket, results.physicalOwner, isPrivacyModeActive || PrivacyModeState.active)
+        ) return
+        lifecycleScope.launch {
+            val row = withContext(Dispatchers.IO) { ClipboardHelper.get(id) }
+            val text = row?.text ?: return@launch
+            if (text != expectedText || !text.contains(results.query)) return@launch
+            clipboardSearchPasteGate.dispatch(
+                isCurrent = {
+                    allowInputAction() && isCurrentEditor(results.logicalEditor) && privacyOwner == results.physicalOwner &&
+                        clipboardSearch.acceptsResult(results.ticket, results.physicalOwner, isPrivacyModeActive || PrivacyModeState.active)
+                },
+                send = {
+                    if (rime.run { isReady } && (prefs.candidates.nextWordPrediction.getValue() || rime.run { candidateSnapshotCached.isPrediction })) {
+                        postRimeJob { clearPredictionContext() }
+                    }
+                    // Android remote connections acknowledge dispatch, not editor-side acceptance.
+                    runCatching { commitText(text, CandidateSnapshot.EMPTY, updateCommittedContent = true) }.getOrDefault(false)
+                },
+                consume = {
+                    clipboardSearch.consume(results.ticket, results.physicalOwner, isPrivacyModeActive || PrivacyModeState.active, rowExists = true)
+                },
+                afterDispatch = afterPaste,
+            )
+        }
+    }
+
+    internal fun registerInputConsumer(): Long = inputAdmissions.register()
+    internal fun unregisterInputConsumer(consumer: Long) = inputAdmissions.unregister(consumer)
+    internal fun acknowledgeInputBarrier(consumer: Long, data: RimeMessage.InputBarrierMessage.Data) =
+        inputAdmissions.acknowledge(consumer, data)
+
     private val editorGeneration = EditorGeneration()
     internal val editorToken: Long get() = editorGeneration.token
     internal fun isCurrentEditor(token: Long): Boolean = editorActive && !replacingDirectBootProcess && editorGeneration.accepts(token)
@@ -137,7 +783,7 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
         if (!isCurrentEditor(editorToken)) return null
         val schema = rime.run { statusCached.schemaId }
         val nativeAscii = rime.run { statusCached.isAsciiMode }
-        val restricted = EditorPolicy.keyboard(info.inputType, info.imeOptions) != EditorKeyboard.USER
+        val restricted = !isClipboardSearchEditing && EditorPolicy.keyboard(info.inputType, info.imeOptions) != EditorKeyboard.USER
         return keyboardLanguage.accept(editorToken, schema, nativeAscii, targetAscii, restricted, rememberLanguage, effect).also {
             if (it.remembersLanguage) prefs.keyboard.manualLanguageMode.setValue(keyboardLanguage.remembered)
         }
@@ -291,7 +937,13 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
         }
     }
 
-    fun postRimeJob(block: suspend RimeApi.() -> Unit): Job {
+    fun postRimeJob(block: suspend RimeApi.() -> Unit): Job = enqueueRimeJob(suppressFailure = false, block)
+
+    private fun postClipboardSearchBind(block: suspend RimeApi.() -> Unit): Job = enqueueRimeJob(suppressFailure = true, block)
+
+    private fun enqueueRimeJob(suppressFailure: Boolean, block: suspend RimeApi.() -> Unit): Job {
+        val admission = inputAdmissions.accept(RimeInputAdmissionContext.current.get())
+            ?: return Job().apply { cancel(CancellationException("Input admission closed")) }
         val origin = editorGeneration.token
         val request = if (scopedFeedbackNanos > 0 || (editorActive && nativeBoundEditorToken == origin)) {
             InputLatencyLog.request(origin, scopedFeedbackNanos)
@@ -299,17 +951,38 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
             null // Startup, rebind and teardown can still belong to the previous native editor.
         }
         val operation: suspend () -> Unit = {
-            if (!replacingDirectBootProcess && editorGeneration.accepts(origin)) {
-                rime.runOnReady {
-                    if (!replacingDirectBootProcess && editorGeneration.accepts(origin)) block()
+            try {
+                if (!replacingDirectBootProcess && editorGeneration.accepts(origin)) {
+                    rime.runOnReady {
+                        if (!replacingDirectBootProcess && editorGeneration.accepts(origin)) block()
+                    }
                 }
+            } catch (failure: CancellationException) {
+                throw failure
+            } catch (failure: Exception) {
+                if (!suppressFailure) throw failure
+                Timber.w("Clipboard search bind failed")
             }
         }
-        if (request == null) return postJob(lifecycleScope, operation)
-        return postJob(lifecycleScope) { withContext(request) { operation() } }.also { job ->
+        val started = AtomicBoolean(false)
+        return postJob(lifecycleScope) {
+            // A cancelled queue completion can precede the actual coroutine's exit.
+            // Only the real coroutine's finally retires work that has already started.
+            if (!started.compareAndSet(false, true)) return@postJob
+            try {
+                withContext(RimeInputAdmissionContext.current.asContextElement(admission.epoch)) {
+                    if (request == null) operation() else withContext(request) { operation() }
+                }
+            } finally {
+                inputAdmissions.finish(admission)
+            }
+        }.also { job ->
             job.invokeOnCompletion { failure ->
-                val failed = failure != null && (failure !is CancellationException || failure is com.osfans.trime.core.RimeUnavailableException)
-                InputLatencyLog.finish(request, failed)
+                if (started.compareAndSet(false, true)) inputAdmissions.finish(admission)
+                if (request != null) {
+                    val failed = failure != null && (failure !is CancellationException || failure is com.osfans.trime.core.RimeUnavailableException)
+                    InputLatencyLog.finish(request, failed)
+                }
             }
         }
     }
@@ -317,6 +990,7 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
     private fun bindEditor() {
         val info = currentInputEditorInfo ?: return
         val origin = editorGeneration.token
+        val physicalOwner = privacyOwner
         val targetMode = privacyMode
         // Rime caches still belong to the preceding editor until beginEditor returns.
         nativeBoundEditorToken = 0L
@@ -329,13 +1003,13 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
             if (isCurrentEditor(origin)) nativeBoundEditorToken = origin
             // Releasing a previous private policy is part of the serialized native boundary.
             // The owner check keeps a stale bind from changing a newer editor's process policy.
-            completeProcessPrivacyUpdate(origin, targetMode)
+            completeProcessPrivacyUpdate(physicalOwner, targetMode)
         }.invokeOnCompletion { failure ->
             // The fallback keyboard remains usable while Rime is unavailable. Do not leave a
             // transitional private snapshot stuck after a failed native bind.
             if (failure != null && !serviceDestroying) {
                 if (nativeBoundEditorToken == origin) nativeBoundEditorToken = 0L
-                completeProcessPrivacyUpdate(origin, targetMode)
+                completeProcessPrivacyUpdate(physicalOwner, targetMode)
             }
         }
     }
@@ -360,6 +1034,7 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
     }
 
     private fun updatePrivacyMode(manual: Boolean = prefs.general.manualPrivacyMode.getValue()) {
+        abortSearchDrain()
         if (replacingDirectBootProcess) {
             deferInputUntilProcessReplacement()
             return
@@ -367,6 +1042,7 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
         val info = currentInputEditorInfo ?: return
         val updated = EditorPolicy.privacy(info, manual)
         if (updated == privacyMode) return
+        discardClipboardSearch()
         inlineSuggestionRequestGate.invalidate()
         InputLatencyLog.reset()
         editorGeneration.advance()
@@ -433,8 +1109,14 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
             jobs.consumeEach { it.join() }
         }
         lifecycleScope.launch {
-            rime.run { messageFlow }.collect {
-                handleRimeMessage(it)
+            rime.run { messageFlow }.collect { message ->
+                if (message is RimeMessage.InputBarrierMessage) {
+                    inputAdmissions.acknowledge(serviceMessageConsumer, message.data)
+                } else if (prepareInputMessage(message)) {
+                    withContext(RimeInputAdmissionContext.current.asContextElement(message.inputAdmission.takeIf { it != 0L })) {
+                        handleRimeMessage(message)
+                    }
+                }
             }
         }
         recreateInputViewPrefs.forEach {
@@ -614,7 +1296,8 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
                                 if (keyCode != KeyEvent.KEYCODE_UNKNOWN) {
                                     // recognized keyCode
                                     sendDownUpKeyEvent(keyCode, metaState)
-                                    if (it.modifiers.ctrl && keyCode == KeyEvent.KEYCODE_C) clearTextSelection()
+                                    // sendKeyEvent is delivered through ViewRoot asynchronously.
+                                    // Changing the selection here can precede the editor's copy.
                                 } else {
                                     if (it.value.value > 0) {
                                         runCatching {
@@ -670,7 +1353,16 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
         }
     }
 
-    private fun replaceInputView(scope: ThemeScope): InputView {
+    private fun replaceInputView(scope: ThemeScope, rebindSearch: Boolean = true): InputView {
+        val hadLocalSearch = clipboardSearch.phase != ClipboardSearchSession.Phase.INACTIVE &&
+            clipboardSearch.phase != ClipboardSearchSession.Phase.RESULTS
+        abortSearchDrain()
+        discardClipboardSearch()
+        if (hadLocalSearch && editorActive) {
+            editorOwnership.add(editorGeneration.advance())
+            nativeBoundEditorToken = 0L
+            InputFeedbackManager.startInput(sensitive = privacyMode.active)
+        }
         inputView?.finishInput()
         val newInputView = InputView(this, rime, scope)
         setInputView(newInputView)
@@ -681,6 +1373,10 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
             // The replacement has no candidate history. Redraw the current snapshot
             // without committing or clearing the unfinished native input.
             postRimeJob { refreshT9Options() }
+            if (hadLocalSearch && rebindSearch) {
+                bindEditor()
+                postRimeJob { setRuntimeOption("ascii_mode", clipboardSearchOriginalAscii) }
+            }
         }
         return newInputView
     }
@@ -700,14 +1396,21 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
     }
 
     private fun replaceInputViews(scope: ThemeScope) {
+        val hadLocalSearch = clipboardSearch.phase != ClipboardSearchSession.Phase.INACTIVE &&
+            clipboardSearch.phase != ClipboardSearchSession.Phase.RESULTS
         loadingPanel = null
         navBarManager.evaluate(window.window!!, inputDeviceManager.useVirtualKeyboard, scope.colors)
-        replaceInputView(scope)
+        replaceInputView(scope, rebindSearch = false)
         replaceCandidateView(scope)
-        if (editorActive) bindEditor()
+        if (editorActive) {
+            bindEditor()
+            if (hadLocalSearch) postRimeJob { setRuntimeOption("ascii_mode", clipboardSearchOriginalAscii) }
+        }
     }
 
     override fun onDestroy() {
+        abortSearchDrain()
+        discardClipboardSearch()
         val destroyedEditors = editorOwnership.snapshot()
         val destroyedOwner = privacyOwner
         serviceDestroying = true
@@ -761,9 +1464,10 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
     }
 
     private fun handleReturnKey() {
+        if (!allowInputAction()) return
         val info = currentInputEditorInfo ?: return
         val ic = currentInputConnection ?: return
-        val action = EditorPolicy.enterAction(info)
+        val action = EditorEnterAction.resolve(info.inputType, info.imeOptions, info.actionId, info.actionLabel)
         if (action == null) sendDownUpKeyEvents(KeyEvent.KEYCODE_ENTER) else ic.performEditorAction(action)
     }
 
@@ -857,6 +1561,10 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
             candidatesStart,
             candidatesEnd,
         )
+        if (clipboardSearch.phase == ClipboardSearchSession.Phase.ENTERING ||
+            clipboardSearch.phase == ClipboardSearchSession.Phase.EDITING ||
+            clipboardSearch.phase == ClipboardSearchSession.Phase.RESTORING
+        ) return
         cursorUpdateIndex += 1
         handleCursorUpdate(newSelStart, newSelEnd, candidatesStart, candidatesEnd, cursorUpdateIndex)
         inputView?.updateSelection(newSelStart, newSelEnd)
@@ -1009,6 +1717,8 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
         attribute: EditorInfo,
         restarting: Boolean,
     ) {
+        abortSearchDrain()
+        discardClipboardSearch()
         val replacementPending = TrimeApplication.getInstance().requestDirectBootProcessReplacementIfUnlocked()
         inlineSuggestionRequestGate.invalidate()
         super.onStartInput(attribute, restarting)
@@ -1073,6 +1783,11 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
     }
 
     override fun onFinishInput() {
+        abortSearchDrain()
+        // A search teardown may advance the Java token before the last native bind finishes.
+        // Snapshot every token owned by this service, so cleanup only touches its own editor.
+        val finishedNativeEditors = editorOwnership.snapshot()
+        discardClipboardSearch()
         inlineSuggestionRequestGate.invalidate()
         val finishedEditor = privacyOwner
         nativeBoundEditorToken = 0L
@@ -1083,7 +1798,7 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
         InputFeedbackManager.finishInput()
         InputLatencyLog.reset()
         editorGeneration.advance()
-        postRimeJob { finishEditor(finishedEditor) }
+        postRimeJob { finishOwnedEditors(finishedNativeEditors) }
             .invokeOnCompletion {
                 // Engine failure must not strand the Java fallback keyboard in privacy mode.
                 // Service destruction is cleaned from the application scope in onDestroy.
@@ -1168,6 +1883,16 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
     }
 
     override fun onFinishInputView(finishingInput: Boolean) {
+        abortSearchDrain()
+        val hadLocalSearch = clipboardSearch.phase != ClipboardSearchSession.Phase.INACTIVE &&
+            clipboardSearch.phase != ClipboardSearchSession.Phase.RESULTS
+        discardClipboardSearch()
+        if (hadLocalSearch && !finishingInput && editorActive) {
+            editorOwnership.add(editorGeneration.advance())
+            nativeBoundEditorToken = 0L
+            bindEditor()
+            postRimeJob { setRuntimeOption("ascii_mode", clipboardSearchOriginalAscii) }
+        }
         Timber.d("onFinishInputView: finishingInput=$finishingInput")
         decorLocationUpdated = false
         inputView?.dismissCandidateActionMenu()
@@ -1199,13 +1924,74 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
         commitText(text, snapshot, updateCommittedContent = true)
     }
 
-    /** Literal macro caller already cleared prediction at its own position in the native FIFO. */
-    internal fun commitTextWithoutPredictionReset(text: String, snapshot: CandidateSnapshot) {
-        commitText(text, snapshot, updateCommittedContent = true)
+    internal fun commitClipboardHistory(text: String): Boolean {
+        if (!allowInputAction() || !canReadEditorContent()) return false
+        if (rime.run { isReady } &&
+            (prefs.candidates.nextWordPrediction.getValue() || rime.run { candidateSnapshotCached.isPrediction })
+        ) postRimeJob { clearPredictionContext() }
+        return commitText(text, CandidateSnapshot.EMPTY, updateCommittedContent = true)
     }
 
-    private fun commitText(text: String, snapshot: CandidateSnapshot, updateCommittedContent: Boolean) {
-        val ic = currentInputConnection ?: return
+    /** Return false when the optional intercepted-paste behavior is disabled. */
+    internal fun repeatClipboardSelection(force: Boolean = false): Boolean {
+        if (!force && !prefs.clipboard.clipboardRepeatSelection.getValue()) return false
+        val state = ClipboardHelper.repeatSnapshot()
+        val selection = (state as? ClipboardRepeatState.Snapshot.Chosen)?.selection
+        if (selection == null || repeatClipboardJob?.isActive == true || searchInputFrozen ||
+            clipboardSearch.phase != ClipboardSearchSession.Phase.INACTIVE || !canReadEditorContent()
+        ) {
+            toast(R.string.clipboard_repeat_unavailable)
+            return true
+        }
+        val owner = editorToken
+        val epoch = PrivacyModeState.observeOrdinaryPersistence()
+        val connection = super.getCurrentInputConnection()
+        if (epoch == null || connection == null) {
+            toast(R.string.clipboard_repeat_unavailable)
+            return true
+        }
+        repeatClipboardJob = lifecycleScope.launch {
+            var drainGeneration: Long? = null
+            try {
+                val text = withContext(Dispatchers.IO) { ClipboardHelper.get(selection.id)?.text }
+                if (text == null || text.length > 65536 || clipboardRepeatDigest(text) != selection.digest ||
+                    !ClipboardHelper.repeatAccepts(selection) || !isCurrentEditor(owner) || !PrivacyModeState.isOrdinaryEpoch(epoch)
+                ) {
+                    if (isCurrentEditor(owner)) toast(R.string.clipboard_repeat_unavailable)
+                    return@launch
+                }
+                if (!drainForSearch(owner)) return@launch
+                drainGeneration = inputDrainGeneration
+                // Never silently replace an in-progress Rime composition with a historical item.
+                if (composingText.isNotEmpty() || rime.run { statusCached.isComposing }) {
+                    toast(R.string.clipboard_repeat_unavailable)
+                    return@launch
+                }
+                val claimed = PrivacyModeState.claimIfOrdinaryEpoch(epoch) {
+                    isCurrentEditor(owner) && searchInputFrozen && inputDrainGeneration == drainGeneration &&
+                        ClipboardHelper.repeatAccepts(selection)
+                }
+                if (!claimed) return@launch
+                // This is the previously validated physical connection. A successful remote
+                // return acknowledges dispatch only, not the target app's eventual acceptance.
+                if (connection.commitText(text, 1) && isCurrentEditor(owner) && PrivacyModeState.isOrdinaryEpoch(epoch)) {
+                    lastCommittedText = text
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                if (isCurrentEditor(owner)) toast(R.string.clipboard_repeat_unavailable)
+            } finally {
+                if (drainGeneration != null && inputDrainGeneration == drainGeneration) releaseSearchDrain()
+            }
+        }
+        return true
+    }
+
+    private fun commitText(text: String, snapshot: CandidateSnapshot, updateCommittedContent: Boolean): Boolean {
+        if (!allowInputAction()) return false
+        val ic = currentInputConnection ?: return false
+        val origin = editorToken
         val directRequest = if (snapshot.requestId == 0L && scopedFeedbackNanos > 0) {
             InputLatencyLog.request(editorGeneration.token, scopedFeedbackNanos)
         } else {
@@ -1230,17 +2016,18 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
             InputLatencyLog.finish(directRequest, failed = true)
             InputLatencyLog.failedCommit(snapshot)
         }
-        val contentAllowed = privacyMode.allowContentAccess && !PrivacyModeState.active
+        val contentAllowed = isCurrentEditor(origin) && !isClipboardSearchEditing && privacyMode.allowContentAccess && !PrivacyModeState.active
         if (!contentAllowed) {
             lastCommittedText = ""
-        } else if (updateCommittedContent) {
+        } else if (committed && updateCommittedContent) {
             lastCommittedText = text
         }
         composingText = ""
         composingCursor = null
         composingStart = null
         selectionAfterCancel = null
-        if (contentAllowed && updateCommittedContent) InputFeedbackManager.textCommitSpeak(text)
+        if (committed && contentAllowed && updateCommittedContent) InputFeedbackManager.textCommitSpeak(text)
+        return committed
     }
 
     /**
@@ -1275,6 +2062,7 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
         keyEventCode: Int,
         metaState: Int = 0,
     ): Boolean {
+        if (!allowInputAction()) return false
         val ic = currentInputConnection ?: return false
         return ic.sendKeyEvent(
             KeyEvent(
@@ -1297,6 +2085,7 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
         keyEventCode: Int,
         metaState: Int = 0,
     ): Boolean {
+        if (!allowInputAction()) return false
         val ic = currentInputConnection ?: return false
         return ic.sendKeyEvent(
             KeyEvent(
@@ -1368,7 +2157,7 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
         // A physical keyboard can start an editor without creating/showing InputView.
         // Restricted editors must receive its keys directly, independently of the
         // soft keyboard's temporary ASCII mode and layout lifecycle.
-        if (EditorPolicy.keyboard(info.inputType, info.imeOptions) != EditorKeyboard.USER) return false
+        if (!isClipboardSearchEditing && EditorPolicy.keyboard(info.inputType, info.imeOptions) != EditorKeyboard.USER) return false
         val keyVal = KeyValue.fromKeyEvent(event)
         if (keyVal.value != RimeKeyMapping.RimeKey_VoidSymbol) {
             val modifiers = KeyModifiers.fromKeyEvent(event)
@@ -1385,6 +2174,26 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
         keyCode: Int,
         event: KeyEvent,
     ): Boolean {
+        ClipboardShortcutDiagnostics.record(event)
+        if (searchInputFrozen) return true
+        if (isClipboardSearchEditing) {
+            if (isClipboardSearchKeyAllowed(keyCode, event.metaState)) forwardKeyEvent(event)
+            return true
+        }
+        if (keyCode == KeyEvent.KEYCODE_V && consumedClipboardShortcut) return true
+        if (keyCode == KeyEvent.KEYCODE_V && event.repeatCount == 0 && event.hasModifiers(KeyEvent.META_META_ON) &&
+            prefs.clipboard.clipboardMetaV.getValue() && canReadEditorContent() && inputView != null
+        ) {
+            inputView?.showClipboardHistory()
+            consumedClipboardShortcut = true
+            return true
+        }
+        if (keyCode == KeyEvent.KEYCODE_V && event.repeatCount == 0 && event.hasModifiers(KeyEvent.META_CTRL_ON) &&
+            prefs.keyboard.hookCtrlCV.getValue() && repeatClipboardSelection()
+        ) {
+            consumedClipboardShortcut = true
+            return true
+        }
         if (inputDeviceManager.evaluateOnKeyDown(event, this)) {
             decorLocationUpdated = false
             forceShowSelf()
@@ -1395,7 +2204,19 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
     override fun onKeyUp(
         keyCode: Int,
         event: KeyEvent,
-    ): Boolean = forwardKeyEvent(event) || super.onKeyUp(keyCode, event)
+    ): Boolean {
+        ClipboardShortcutDiagnostics.record(event)
+        if (keyCode == KeyEvent.KEYCODE_V && consumedClipboardShortcut) {
+            consumedClipboardShortcut = false
+            return true
+        }
+        if (searchInputFrozen) return true
+        if (isClipboardSearchEditing) {
+            if (isClipboardSearchKeyAllowed(keyCode, event.metaState)) forwardKeyEvent(event)
+            return true
+        }
+        return forwardKeyEvent(event) || super.onKeyUp(keyCode, event)
+    }
 
     // Added in API level 14, deprecated in 29
     // it's needed because editors still use it even on API 36
@@ -1464,6 +2285,7 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
         code: Int,
         mask: Int,
     ): Boolean {
+        if (!allowInputAction()) return true
         val ic = currentInputConnection ?: return false
         // 没按下 Ctrl 键
         if (mask != KeyEvent.META_CTRL_ON) {
@@ -1527,6 +2349,7 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
             KeyEvent.KEYCODE_V -> {
                 // 粘贴
                 if (prefs.keyboard.hookCtrlCV.getValue()) {
+                    if (repeatClipboardSelection()) return true
                     val etr = ExtractedTextRequest()
                     etr.token = 0
                     val et = ic.getExtractedText(etr, 0)
@@ -1575,7 +2398,7 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
     fun clearTextSelection() {
         val ic = currentInputConnection ?: return
         val etr = ExtractedTextRequest().apply { token = 0 }
-        val et = currentInputConnection.getExtractedText(etr, 0)
+        val et = ic.getExtractedText(etr, 0)
         et?.let {
             if (it.selectionStart != it.selectionEnd) {
                 ic.setSelection(it.selectionEnd, it.selectionEnd)
@@ -1584,6 +2407,7 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
     }
 
     internal fun updateComposingText(text: String, cursor: Int? = null) {
+        if (!allowInputAction()) return
         val ic = currentInputConnection ?: return
         val position = cursor?.coerceIn(0, text.length)
         if (text == composingText && position == composingCursor && (position == null || composingSelectionMatches)) return
@@ -1622,7 +2446,7 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
         val selected = currentInputConnection?.getSelectedText(0)?.toString()
         val commitPreview = rimeComposition.commitTextPreview
         val preedit = rimeComposition.preedit ?: ""
-        val beforeCursor = getTextAroundCursor(1024, before = true) ?: ""
+        val beforeCursor = getTextAroundCursor(before = true) ?: ""
         val afterCursor = getTextAroundCursor(before = false) ?: ""
         val lastCommitted = lastCommittedText
 
@@ -1652,15 +2476,11 @@ open class TrimeInputMethodService : LifecycleInputMethodService() {
     )
 
     private fun getTextAroundCursor(
-        initialStep: Int = 1024,
         before: Boolean,
     ): String? {
         val ic = currentInputConnection ?: return null
-        var step = initialStep
-        while (true) {
-            val text = (if (before) ic.getTextBeforeCursor(step, 0) else ic.getTextAfterCursor(step, 0)) ?: return ""
-            if (text.length < step) return text.toString()
-            step *= 2
+        return readSurroundingText(before) { length ->
+            if (before) ic.getTextBeforeCursor(length, 0) else ic.getTextAfterCursor(length, 0)
         }
     }
 

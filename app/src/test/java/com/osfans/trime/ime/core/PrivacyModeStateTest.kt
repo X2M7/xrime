@@ -192,6 +192,33 @@ class PrivacyModeStateTest :
             PrivacyModeState.releasePersistencePermit(permit)
         }
 
+        "old permits may persist but cannot publish into a later ordinary editor" {
+            val permit = requireNotNull(PrivacyModeState.acquirePersistencePermit())
+            val oldEpoch = requireNotNull(PrivacyModeState.observeOrdinaryPersistence())
+            PrivacyModeState.beginInput(801, PrivacyMode(password = true))
+            PrivacyModeState.endInput(801)
+            PrivacyModeState.active shouldBe false
+            PrivacyModeState.allowsPersistence(permit) shouldBe true
+            PrivacyModeState.isOrdinaryEpoch(oldEpoch) shouldBe false
+            var published = false
+            PrivacyModeState.publishIfOrdinary(permit) { published = true } shouldBe false
+            published shouldBe false
+            val current = requireNotNull(PrivacyModeState.acquirePersistencePermit())
+            PrivacyModeState.publishIfOrdinary(current) { published = true } shouldBe true
+            published shouldBe true
+            PrivacyModeState.releasePersistencePermit(permit)
+            PrivacyModeState.allowsPersistence(current) shouldBe true
+            PrivacyModeState.releasePersistencePermit(current)
+        }
+
+        "an ordinary editor change invalidates only publication of the old permit" {
+            val permit = requireNotNull(PrivacyModeState.acquirePersistencePermit())
+            PrivacyModeState.beginInput(802, PrivacyMode())
+            PrivacyModeState.allowsPersistence(permit) shouldBe true
+            PrivacyModeState.publishIfOrdinary(permit) { error("old editor suggestion published") } shouldBe false
+            PrivacyModeState.releasePersistencePermit(permit)
+        }
+
         "publishing a granted lease is atomic with a private transition" {
             val permit = requireNotNull(PrivacyModeState.acquirePersistencePermit())
             val publishEntered = CountDownLatch(1)

@@ -213,6 +213,7 @@ def poll(fetch, check):
 
 
 def publish(args, manifest, paths):
+    raise RuntimeError("The legacy X2M7/trime publisher is disabled for xrime; a separate release process is required")
     records = args.records.resolve()
     assets_directory = next(iter(paths.values())).parent
     require(not records.is_relative_to(assets_directory), "Publication records must stay outside public-assets")
@@ -321,6 +322,8 @@ def main():
     parser.add_argument('--manifest', type=Path, required=True)
     parser.add_argument('--records', type=Path, required=True)
     args = parser.parse_args()
+    if args.command == 'publish':
+        raise RuntimeError("The legacy X2M7/trime publisher is disabled for xrime; a separate release process is required")
     args.resume_release_id = None  # Never alter or overwrite an existing tag/release.
     manifest, paths = load_manifest(args.manifest)
     if args.command == 'plan':

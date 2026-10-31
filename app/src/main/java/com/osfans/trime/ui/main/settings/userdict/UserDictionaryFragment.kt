@@ -21,6 +21,8 @@ import androidx.fragment.app.activityViewModels
 import androidx.lifecycle.lifecycleScope
 import com.osfans.trime.R
 import com.osfans.trime.data.userdict.CustomPhraseStore
+import com.osfans.trime.data.userdict.DictionaryDocumentStager
+import com.osfans.trime.data.userdict.DictionaryTextFormats
 import com.osfans.trime.data.userdict.UserDictManager
 import com.osfans.trime.ime.core.EditorPolicy
 import com.osfans.trime.ui.common.dialog.PublicAlertDialogs
@@ -29,13 +31,9 @@ import com.osfans.trime.util.importErrorDialog
 import com.osfans.trime.util.item
 import io.github.whiredplanck.storageaccess.StorageAccess
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import splitties.dimensions.dp
-import java.io.IOException
 import java.io.InputStream
-import java.io.OutputStream
 
 class UserDictionaryFragment : Fragment() {
     private val storageAccess = StorageAccess(this)
@@ -74,10 +72,10 @@ class UserDictionaryFragment : Fragment() {
                 popup.menu.item(R.string.export) {
                     operate {
                         val doc = storageAccess.createFile(filename = "$dictName.txt", mimeType = "text/plain") ?: return@operate
-                        val count = writeDocument(doc.uri) { output ->
+                        val count = DictionaryDocumentStager.write(requireContext().applicationContext, doc.uri, DictionaryDocumentStager.MAX_EXPORT_BYTES) { staged ->
                             viewModel.rime.runOnReady {
                                 maintainUserDictionaries {
-                                    UserDictManager.exportUserDict(output, dictName, doc.name).getOrThrow()
+                                    UserDictManager.exportUserDictToFile(staged, dictName, doc.name).getOrThrow()
                                 }
                             }
                         }
@@ -199,7 +197,7 @@ class UserDictionaryFragment : Fragment() {
 
                         1 -> operate {
                             val picked = storageAccess.pickFile(mimeTypes = arrayOf("text/plain")) ?: return@operate
-                            val count = readDocument(picked.uri) { input ->
+                            val count = readDocument(picked.uri, DictionaryTextFormats.MAX_PHRASE_BYTES) { input ->
                                 viewModel.rime.runOnReady {
                                     maintainUserDictionaries { CustomPhraseStore.importPhrases(input) }
                                 }
@@ -209,9 +207,13 @@ class UserDictionaryFragment : Fragment() {
 
                         2 -> operate {
                             val doc = storageAccess.createFile(filename = CustomPhraseStore.FILE_NAME, mimeType = "text/plain") ?: return@operate
-                            writeDocument(doc.uri) { output ->
+                            DictionaryDocumentStager.write(requireContext().applicationContext, doc.uri, DictionaryTextFormats.MAX_PHRASE_BYTES) { staged ->
                                 viewModel.rime.runOnReady {
-                                    maintainUserDictionaries { CustomPhraseStore.export(output) }
+                                    maintainUserDictionaries {
+                                        DictionaryDocumentStager.boundedOutput(staged.outputStream(), DictionaryTextFormats.MAX_PHRASE_BYTES).use {
+                                            CustomPhraseStore.export(it)
+                                        }
+                                    }
                                 }
                             }
                             ui.showSnackBar(getString(R.string.userdict_phrases_exported))
@@ -229,19 +231,12 @@ class UserDictionaryFragment : Fragment() {
         )
     }
 
-    private suspend fun <T> readDocument(uri: Uri, operation: suspend (InputStream) -> T): T {
-        val resolver = requireContext().contentResolver
-        return withContext(Dispatchers.IO) {
-            (resolver.openInputStream(uri) ?: throw IOException("Cannot open dictionary document")).use { operation(it) }
-        }
-    }
+    private suspend fun <T> readDocument(
+        uri: Uri,
+        limit: Long = DictionaryTextFormats.MAX_IMPORT_BYTES,
+        operation: suspend (InputStream) -> T,
+    ): T = DictionaryDocumentStager.read(requireContext().applicationContext, uri, limit, operation)
 
-    private suspend fun <T> writeDocument(uri: Uri, operation: suspend (OutputStream) -> T): T {
-        val resolver = requireContext().contentResolver
-        return withContext(Dispatchers.IO) {
-            (resolver.openOutputStream(uri, "wt") ?: throw IOException("Cannot write dictionary document")).use { operation(it) }
-        }
-    }
 
     private fun showPhraseEditor(text: String) {
         val builder = PublicAlertDialogs.builder(requireContext())

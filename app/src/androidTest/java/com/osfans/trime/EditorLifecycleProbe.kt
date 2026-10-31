@@ -105,6 +105,7 @@ import org.kodein.di.DI
 import org.kodein.di.bindInstance
 import org.kodein.di.direct
 import org.kodein.di.instance
+import splitties.dimensions.dp
 import java.io.File
 import java.security.MessageDigest
 import java.util.UUID
@@ -826,6 +827,24 @@ object EditorLifecycleProbe {
                 }
                 val window = main { checkNotNull(input()).di.direct.instance<KeyboardWindow>() }
                 try {
+                    val t9Keyboard = main { window.currentKeyboard }
+                    main { window.switchKeyboard("number") }
+                    until("$theme T9 number page is visible") {
+                        keyboardId.get(window) == "number" && !window.currentKeyboard.isT9Layout
+                    }
+                    main {
+                        val number = window.currentKeyboard
+                        check(window.usesT9CompositionPanel) { "$theme number page lost the T9 panel" }
+                        check(number.keyboardHeight == t9Keyboard.keyboardHeight) { "$theme number page changed the T9 height" }
+                        check(number.horizontalGap == t9Keyboard.horizontalGap && number.verticalGap == t9Keyboard.verticalGap) {
+                            "$theme number page changed the T9 key spacing"
+                        }
+                        check(number.roundCorner == t9Keyboard.roundCorner && number.keyBorder == t9Keyboard.keyBorder) {
+                            "$theme number page changed the T9 key outline"
+                        }
+                    }
+                    main { window.switchKeyboard(".return") }
+                    until("$theme number page returns to T9") { window.currentKeyboard.isT9Layout }
                     main { window.switchKeyboard("symbols") }
                     until("$theme manual privacy fixture selects symbols") {
                         keyboardId.get(window) == "symbols" &&
@@ -879,6 +898,67 @@ object EditorLifecycleProbe {
                 until("$theme manual privacy fixture restores T9") { window.currentKeyboard.isT9Layout }
                 api { check(!statusCached.isAsciiMode) }
             }
+
+            val languagePreference = AppPrefs.defaultInstance().keyboard.manualLanguageMode
+            val languageStore = languagePreference.sharedPreferences
+            val languageKey = languagePreference.key
+            val savedLanguagePresent = languageStore.contains(languageKey)
+            val savedLanguageRaw = languageStore.getString(languageKey, null)
+            val savedLanguage = languagePreference.getValue()
+            val savedRememberedLanguage = main { service.keyboardLanguage.remembered }
+            check(ThemeManager.selectTheme("trime") == "trime")
+            try {
+                api {
+                    clearComposition()
+                    check(selectSchema("luna_pinyin"))
+                    setRuntimeOption("ascii_mode", false)
+                }
+                until("full-pinyin fixture shows the standard 26-key layout") {
+                    input()?.let {
+                        it.di.direct.instance<Theme>() === ThemeManager.activeTheme &&
+                            keyboardId.get(it.di.direct.instance<KeyboardWindow>()) == "qwerty"
+                    } == true
+                }
+                val fullWindow = main { checkNotNull(input()).di.direct.instance<KeyboardWindow>() }
+                fun geometry(keyboard: Keyboard) = keyboard.keys.map { listOf(it.x, it.y, it.width, it.height) }
+                val original = main { fullWindow.currentKeyboard }
+                val expectedGeometry = main { geometry(original) }
+                main { fullWindow.switchLanguage(true) }
+                until("full-pinyin fixture switches to English") { keyboardId.get(fullWindow) == "qwerty_ascii" }
+                api { check(statusCached.isAsciiMode) }
+                main {
+                    val english = fullWindow.currentKeyboard
+                    check(english.keyboardHeight == original.keyboardHeight && geometry(english) == expectedGeometry) {
+                        "Switching the 26-key layout to English changed its geometry"
+                    }
+                }
+                main { fullWindow.switchLanguage(false) }
+                until("full-pinyin fixture returns to Chinese") { keyboardId.get(fullWindow) == "qwerty" }
+                api { check(!statusCached.isAsciiMode) }
+                main { check(geometry(fullWindow.currentKeyboard) == expectedGeometry) }
+            } finally {
+                try {
+                    // This FIFO barrier also settles both explicit language commands.
+                    api {
+                        clearComposition()
+                        check(selectSchema("luna_pinyin_t9"))
+                        setRuntimeOption("ascii_mode", false)
+                    }
+                } finally {
+                    main {
+                        val edit = languageStore.edit()
+                        if (savedLanguagePresent) edit.putString(languageKey, savedLanguageRaw) else edit.remove(languageKey)
+                        check(edit.commit()) { "26-key fixture language restoration did not persist" }
+                        service.keyboardLanguage.reloadRemembered(savedRememberedLanguage)
+                        check(languageStore.contains(languageKey) == savedLanguagePresent &&
+                            languageStore.getString(languageKey, null) == savedLanguageRaw &&
+                            languagePreference.getValue() == savedLanguage &&
+                            service.keyboardLanguage.remembered == savedRememberedLanguage
+                        ) { "26-key fixture did not restore language preference and in-memory state" }
+                    }
+                }
+            }
+            until("full-pinyin fixture restores T9") { input()?.di?.direct?.instance<KeyboardWindow>()?.currentKeyboard?.isT9Layout == true }
         } finally {
             main { manualPrivacyMode.setValue(false) }
             ThemeManager.selectTheme(originalTheme)
@@ -1321,6 +1401,48 @@ object EditorLifecycleProbe {
                     } + listOf("a", "b").map { TextKeyboard.TextKey(click = KeyActionToken.Plain(it)) },
                 )
                 val context = ContextThemeWrapper(editor, android.R.style.Theme_DeviceDefault)
+                // A theme-level key_width must lay out exactly like the same
+                // explicit keyboard width, including wrapping and spacer keys.
+                val widthTheme = theme.copy(style = theme.style.copy(keyWidth = 10f))
+                val widthLayout = layout.copy(
+                    width = 0f,
+                    keys = listOf(TextKeyboard.TextKey(width = 5f)) +
+                        (0 until 12).map { TextKeyboard.TextKey(click = KeyActionToken.Plain("a")) } +
+                        TextKeyboard.TextKey(click = KeyActionToken.Plain("b"), width = 20f),
+                )
+                val inheritedWidths = Keyboard(context, widthTheme, 800, widthLayout).keys
+                val explicitWidths = Keyboard(context, widthTheme, 800, widthLayout.copy(width = 10f)).keys
+                check(inheritedWidths.size == 13 && inheritedWidths.any { it.row > 0 })
+                check(inheritedWidths.map { listOf(it.x, it.y, it.width, it.height, it.row, it.column) } ==
+                    explicitWidths.map { listOf(it.x, it.y, it.width, it.height, it.row, it.column) }) {
+                    "Theme key_width did not match the explicit keyboard width"
+                }
+                val heightPreference = AppPrefs.defaultInstance().keyboard.keyboardHeight
+                val previousHeight = heightPreference.getValue()
+                try {
+                    heightPreference.setValue(0)
+                    val naturalTheme = theme.copy(style = theme.style.copy(keyboardHeight = 0, keyboardHeightLand = 0))
+                    val naturalLayout = layout.copy(
+                        width = 50f,
+                        columns = 2,
+                        height = 40f,
+                        keyboardHeight = 0,
+                        keyboardHeightLand = 0,
+                        keys = listOf(
+                            TextKeyboard.TextKey(click = KeyActionToken.Plain("a")),
+                            TextKeyboard.TextKey(click = KeyActionToken.Plain("b")),
+                            TextKeyboard.TextKey(click = KeyActionToken.Plain("c"), height = 60f),
+                        ),
+                    )
+                    val natural = Keyboard(context, naturalTheme, 800, naturalLayout)
+                    check(natural.keyboardHeight == context.dp(100)) { "Missing total height did not use natural row heights" }
+                    check(natural.keys.map { it.row } == listOf(0, 0, 1))
+                    check(natural.keys.last().y == natural.keys.first().height)
+                    val explicit = Keyboard(context, naturalTheme, 800, naturalLayout.copy(keyboardHeight = 200, keyboardHeightLand = 200))
+                    check(explicit.keyboardHeight == context.dp(200)) { "Explicit keyboard height lost priority" }
+                } finally {
+                    heightPreference.setValue(previousHeight)
+                }
                 val keyboard = Keyboard(context, theme, 800, layout)
                 val broadcaster = InputBroadcaster()
                 val di = DI {
@@ -1598,7 +1720,7 @@ object EditorLifecycleProbe {
         checkNotNull(outcome).getOrThrow()
     }
 
-    fun run(instrumentation: Instrumentation, observeImeAnimations: Boolean = true) {
+    fun run(instrumentation: Instrumentation, observeImeAnimations: Boolean = true, visibilityOnly: Boolean = false) {
         val context = instrumentation.targetContext
         val result = Bundle()
         var activity: Activity? = null
@@ -1796,8 +1918,15 @@ object EditorLifecycleProbe {
                         api { }
                     }
                     api { clearComposition() }
-                    EngineUnavailableGlyphProbe.verify(instrumentation, service, chat)
-                    PopupColorRegression.verify(instrumentation, main { checkNotNull(input()) }, chat)
+                    if (!visibilityOnly) {
+                        SearchDrainProbe.verify(instrumentation, service, chat)
+                        SearchBindRecoveryProbe.verify(instrumentation, service, chat)
+                        SearchOwnershipProbe.verify(instrumentation, service, chat, ::api)
+                        ClipboardSearchUiProbe.verify(instrumentation, service, chat, ::input, ::api)
+                        ClipboardImageUiProbe.verify(instrumentation, service, chat, ::input)
+                        EngineUnavailableGlyphProbe.verify(instrumentation, service, chat)
+                        PopupColorRegression.verify(instrumentation, main { checkNotNull(input()) }, chat)
+                    }
                     api {
                         check(selectSchema("luna_pinyin_t9"))
                         setRuntimeOption("ascii_mode", false)
@@ -2320,9 +2449,13 @@ object EditorLifecycleProbe {
                         for (theme in listOf("trime", "tongwenfeng.trime")) {
                             ThemeManager.selectTheme(theme)
                             until("$theme T9 before schema switch") { input() != null && keyboard().isT9Layout }
+                            EmptyKeyProbe.verify(instrumentation, service, main { checkNotNull(input()) }, theme)
                             verifyT9Accessibility(theme)
                             if (theme == "trime") {
+                                if (Build.VERSION.SDK_INT >= 29) TextEditorPanelProbe.verify(instrumentation, service, chat, ::input)
                                 ResidentWindowColorRegression.verify(instrumentation, main { checkNotNull(input()) })
+                                val colorChecks = BuiltinKeyboardColorProbe.verify(instrumentation, main { checkNotNull(input()) })
+                                phase("Built-in keyboard color checks: $colorChecks")
                             }
                             api {
                                 check(selectSchema("luna_pinyin_simp"))
@@ -2442,7 +2575,7 @@ object EditorLifecycleProbe {
                         ThemeManager.selectTheme(originalTheme)
                         until("original theme retains selected T9") { input() != null && keyboard().isT9Layout }
                     }
-                    verifyThemeLayoutAndCandidates()
+                    if (!visibilityOnly) verifyThemeLayoutAndCandidates()
 
                     suspend fun verifyEditorInputTypes() {
                         val cases = listOf(
@@ -2516,7 +2649,7 @@ object EditorLifecycleProbe {
                         api { check(!Rime.isRimePrivacyGuardEnabledForTesting()) }
                         phase("PASS: no-personalized-learning flag controls privacy without replacing T9")
                     }
-                    verifyEditorInputTypes()
+                    if (!visibilityOnly) verifyEditorInputTypes()
 
                     suspend fun verifyPrivacyAndEditorActions() {
                         verifyTransientKeyboardAcrossPrivacyChange(instrumentation, service)
@@ -2602,7 +2735,15 @@ object EditorLifecycleProbe {
                             actions.clear()
                         }
                         focus(other)
-                        check(main { checkNotNull(input()).di.direct.instance<EnterKeyDisplayDelegate>().keyLabel } == "Continue")
+                        main {
+                            val display = checkNotNull(input()).di.direct.instance<EnterKeyDisplayDelegate>()
+                            val expected = if (display.mode == EnterKeyDisplayDelegate.Mode.ACTION_LABEL_NEVER) {
+                                ThemeManager.activeTheme.style.enterLabels.default
+                            } else {
+                                "Continue"
+                            }
+                            check(display.keyLabel == expected)
+                        }
                         enter()
                         api { }
                         until("custom action uses ID 731") { actions.lastOrNull() == 731 }
@@ -2640,7 +2781,7 @@ object EditorLifecycleProbe {
 
                         verifyHardwareEditorPolicies(instrumentation, service, editor, chat, other)
                     }
-                    verifyPrivacyAndEditorActions()
+                    if (!visibilityOnly) verifyPrivacyAndEditorActions()
 
                     suspend fun verifyQueuedEngineJoin() {
                         val queueEntered = CompletableDeferred<Unit>()
@@ -2662,7 +2803,7 @@ object EditorLifecycleProbe {
                         check(overtook)
                         phase("PASS: joining an engine job preserves queue order")
                     }
-                    verifyQueuedEngineJoin()
+                    if (!visibilityOnly) verifyQueuedEngineJoin()
 
                     suspend fun verifyDelayedSwitchCallbacks() {
                         // A real suspend builder must retain the editor that requested its dialog.
@@ -2773,7 +2914,7 @@ object EditorLifecycleProbe {
                         focus(chat)
                         phase("PASS: delayed switch dialogs, queued options and stale popup callbacks remain editor-owned")
                     }
-                    verifyDelayedSwitchCallbacks()
+                    if (!visibilityOnly) verifyDelayedSwitchCallbacks()
 
                     suspend fun verifyStaleEditorInputs() {
                         type("64")
@@ -2853,7 +2994,7 @@ object EditorLifecycleProbe {
                         check(main { other.text.isEmpty() }) { "Cancelled gesture clicked into the next editor" }
                         focus(chat)
                     }
-                    verifyStaleEditorInputs()
+                    if (!visibilityOnly) verifyStaleEditorInputs()
 
                     suspend fun verifyThemeFallbackAndTipOwnership() {
                         // Rime's own include/patch resolver creates a real third-party theme without T9.
@@ -2877,6 +3018,7 @@ object EditorLifecycleProbe {
                         check(ThemeManager.prefs.selectedTheme.getValue() == id)
                         check("luna_pinyin_t9" !in ThemeManager.activeTheme.presetKeyboards)
                         until("third-party theme uses compatible T9") { input() != null && keyboard().isT9Layout }
+                        if (visibilityOnly) return
                         val beforeRestart = main {
                             val token = service.editorToken
                             chat.setText("")
@@ -3124,7 +3266,7 @@ object EditorLifecycleProbe {
                         api { check(!statusCached.isAsciiMode) }
                         destroyWebFixture(required = true)
                     }
-                    verifyWebEditor()
+                    if (!visibilityOnly) verifyWebEditor()
 
                     suspend fun verifyRepeatedImeVisibility() {
                         val baseline = main { chat.text.toString() }
@@ -3207,15 +3349,45 @@ object EditorLifecycleProbe {
                         }
                         type("64426")
                         api { check(getRawInput() == "64426") }
-                        until("pinyin choices still update after 100 visibility cycles") {
-                            input()?.let { view ->
-                                descendants(view).filterIsInstance<T9DisambiguationView>().flatMap(::descendants)
-                                    .filterIsInstance<TextView>().any { it.text.toString() == "ni" && it.isShown }
-                            } == true
+                        // The choice list moves between the panel and its sibling sidebar.
+                        // A full-sidebar segment header is a FrameLayout, not a choice.
+                        fun visibleNiChoice(): TextView? = input()?.let { root ->
+                            descendants(root).filterIsInstance<T9DisambiguationView>()
+                                .flatMap { panel -> sequenceOf(panel, panel.sidebar).flatMap(::descendants) }
+                                .filterIsInstance<RecyclerView>()
+                                .flatMap { it.children }
+                                .filterIsInstance<TextView>()
+                                .firstOrNull { it.text.toString() == "ni" && it.isShown }
+                        }
+                        try {
+                            until("pinyin choices still update after 100 visibility cycles") {
+                                visibleNiChoice() != null
+                            }
+                        } catch (failure: TimeoutCancellationException) {
+                            var engineState = "unavailable"
+                            api {
+                                val state = t9Cached
+                                engineState = "expectedSchema=${selectedSchemaId() == "luna_pinyin_t9"}, " +
+                                    "ascii=${statusCached.isAsciiMode}, enabled=${state.enabled}, " +
+                                    "expectedInput=${state.input == "64426"}, choices=${state.choices.size}, " +
+                                    "hasNi=${state.choices.any { it.spelling == "ni" }}"
+                            }
+                            val viewState = main {
+                                val view = input()
+                                val all = view?.let(::descendants)?.toList().orEmpty()
+                                val panels = all.filterIsInstance<T9DisambiguationView>()
+                                val panelTexts = panels.flatMap { descendants(it).toList() }.filterIsInstance<TextView>()
+                                val allTexts = all.filterIsInstance<TextView>()
+                                "inputPresent=${view != null}, panels=${panels.size}, " +
+                                    "visiblePanels=${panels.count { it.isShown }}, " +
+                                    "niInPanel=${panelTexts.count { it.text.toString() == "ni" }}, " +
+                                    "visibleNiInPanel=${panelTexts.count { it.text.toString() == "ni" && it.isShown }}, " +
+                                    "visibleNiInInput=${allTexts.count { it.text.toString() == "ni" && it.isShown }}"
+                            }
+                            throw IllegalStateException("Timed out: pinyin choices still update after 100 visibility cycles; $engineState; $viewState", failure)
                         }
                         main {
-                            descendants(checkNotNull(input())).filterIsInstance<T9DisambiguationView>().flatMap(::descendants)
-                                .filterIsInstance<TextView>().first { it.text.toString() == "ni" && it.isShown }.performClick()
+                            checkNotNull(visibleNiChoice()).performClick()
                         }
                         api {
                             check(getRawInput() == "64426")
@@ -3245,15 +3417,21 @@ object EditorLifecycleProbe {
                     verifyRepeatedImeVisibility()
                 }
             }
-            verifyResidentWindowIdempotency(instrumentation, editor)
-            phase("PASS: resident windows preserve cached views and skip duplicate attachment lifecycles")
-            verifyThirdPartyModifiers(instrumentation, editor)
-            phase("PASS: isolated third-party KeyView dispatch consumes temporary modifiers and preserves actual locks")
-            verifyInputBarMeasurement(instrumentation)
-            verifyFlexibleToolbarMeasurement(instrumentation)
-            phase("PASS: isolated production toolbar preserves adaptive third-party sizing")
-            verifyThemeFontDirectoryCache(instrumentation)
-            result.putString("stream", "PASS: input-field matrix, editor actions, stale output rejection, third-party T9 fallback, real WebView and 100 show/hide cycles\n")
+            if (!visibilityOnly) {
+                verifyResidentWindowIdempotency(instrumentation, editor)
+                phase("PASS: resident windows preserve cached views and skip duplicate attachment lifecycles")
+                verifyThirdPartyModifiers(instrumentation, editor)
+                phase("PASS: isolated third-party KeyView dispatch consumes temporary modifiers and preserves actual locks")
+                verifyInputBarMeasurement(instrumentation)
+                verifyFlexibleToolbarMeasurement(instrumentation)
+                phase("PASS: isolated production toolbar preserves adaptive third-party sizing")
+                verifyThemeFontDirectoryCache(instrumentation)
+            }
+            result.putString(
+                "stream",
+                if (visibilityOnly) "PASS: third-party T9 fallback and 100 show/hide cycles\n"
+                else "PASS: input-field matrix, editor actions, stale output rejection, third-party T9 fallback, real WebView and 100 show/hide cycles\n",
+            )
             passed = true
         } catch (failure: Throwable) {
             result.putString("stream", "FAIL: ${failure.stackTraceToString()}\n")

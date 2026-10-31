@@ -6,6 +6,7 @@ import com.osfans.trime.core.RimeConfig
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
+import timber.log.Timber
 
 enum class InputLayout { T9, FULL_PINYIN }
 
@@ -50,6 +51,10 @@ internal interface InputSetupEngine {
     suspend fun setOption(name: String, value: Boolean)
 
     suspend fun clearPrediction()
+
+    fun preferredFullSchema(): String
+
+    fun rememberFullSchema(id: String)
 }
 
 internal class RimeInputSetupEngine(private val rime: RimeApi) : InputSetupEngine {
@@ -90,6 +95,19 @@ internal class RimeInputSetupEngine(private val rime: RimeApi) : InputSetupEngin
     override suspend fun setOption(name: String, value: Boolean) = rime.setRuntimeOption(name, value)
 
     override suspend fun clearPrediction() = rime.clearPredictionContext()
+
+    override fun preferredFullSchema(): String = AppPrefs.defaultInstance().general.lastFullPinyinSchema.getValue()
+
+    override fun rememberFullSchema(id: String) {
+        try {
+            val preference = AppPrefs.defaultInstance().general.lastFullPinyinSchema
+            if (preference.getValue() != id) preference.setValue(id)
+        } catch (failure: Exception) {
+            // The native change already succeeded; a failed preference write must not
+            // falsely report that it was rolled back.
+            Timber.e(failure, "Unable to remember the full-pinyin schema")
+        }
+    }
 }
 
 /** Settings and onboarding use the same native schema/option selection, without deployment. */
@@ -122,11 +140,21 @@ object InputSetupController {
         (previous.switches + "ascii_mode").filter { it.isNotEmpty() && it != "prediction" }.forEach {
             previousOptions[it] = engine.getOption(it)
         }
+        val enabled = engine.enabledSchemas()
+        val preferredFull = engine.preferredFullSchema()
         val target = when (selection.layout) {
             InputLayout.T9 -> "luna_pinyin_t9"
-            InputLayout.FULL_PINYIN -> if (selection.variant == ChineseVariant.SIMPLIFIED) "luna_pinyin_simp" else "luna_pinyin"
+            // Existing users of the simplified schema keep its customizations.
+            // Fresh installations use one full-pinyin schema for both variants.
+            InputLayout.FULL_PINYIN -> when {
+                previous.schemaId == "luna_pinyin_simp" && "luna_pinyin_simp" in enabled -> "luna_pinyin_simp"
+                previous.schemaId == "luna_pinyin" && "luna_pinyin" in enabled -> "luna_pinyin"
+                preferredFull in setOf("luna_pinyin", "luna_pinyin_simp") && preferredFull in enabled -> preferredFull
+                "luna_pinyin" in enabled -> "luna_pinyin"
+                else -> "luna_pinyin_simp"
+            }
         }
-        if (target !in engine.enabledSchemas()) throw InputSetupException(InputSetupFailure.UNAVAILABLE_SCHEMA)
+        if (target !in enabled) throw InputSetupException(InputSetupFailure.UNAVAILABLE_SCHEMA)
         var changed = false
         try {
             if (target != previous.schemaId) {
@@ -148,6 +176,12 @@ object InputSetupController {
             if (confirmed.schemaId != target || confirmed.selection != selection) {
                 throw InputSetupException(InputSetupFailure.APPLY_FAILED)
             }
+            val fullSchema = if (previous.schemaId in setOf("luna_pinyin", "luna_pinyin_simp") && variantOption(previous) != null) {
+                previous.schemaId
+            } else {
+                target.takeIf { it in setOf("luna_pinyin", "luna_pinyin_simp") }
+            }
+            fullSchema?.let(engine::rememberFullSchema)
             return confirmed
         } catch (failure: Exception) {
             val restored = if (!changed) {

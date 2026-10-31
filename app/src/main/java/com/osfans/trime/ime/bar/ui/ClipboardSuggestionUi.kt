@@ -76,15 +76,15 @@ class ClipboardSuggestionUi(
                 text,
                 lParams(wrapContent, wrapContent) {
                     after(icon, spacing)
-                    before(dismiss)
+                    before(dismiss, spacing)
                     centerVertically()
                     constrainedWidth = true
+                    horizontalBias = 0f
                 },
             )
             add(
                 dismiss,
                 lParams(dp(20), dp(20)) {
-                    after(text, spacing)
                     endOfParent(spacing)
                     centerVertically()
                 },
@@ -100,12 +100,14 @@ class ClipboardSuggestionUi(
         constraintLayout {
             add(
                 suggestionView,
-                lParams(wrapContent, matchConstraints) {
+                lParams(matchConstraints, matchConstraints) {
                     startOfParent()
                     endOfParent()
                     centerVertically()
                     verticalMargin = dp(4)
-                    constrainedWidth = true
+                    // Keep the dismiss target in the same place for short and long clips,
+                    // while allowing narrow toolbars to constrain the whole suggestion.
+                    matchConstraintMaxWidth = dp(272)
                 },
             )
         }

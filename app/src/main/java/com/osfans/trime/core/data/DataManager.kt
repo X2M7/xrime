@@ -217,7 +217,18 @@ object DataManager {
             DataDiff.diff(oldChecksums, newChecksums) { path ->
                 resolveSharedAssetDestination(sharedDir, path).isFile
             },
-            copyAsset = { path, destination -> ResourceUtils.copyFile(path, destination.absolutePath).getOrThrow() },
+            copyAsset = { path, destination ->
+                if (path == LunaEssayPatch.TARGET) {
+                    val expected = checkNotNull(newChecksums.files[path]) { "Missing logical vocabulary checksum" }
+                    appContext.assets.open(LunaEssayPatch.SOURCE).use { source ->
+                        appContext.assets.open(LunaEssayPatch.PATCH).use { patch ->
+                            LunaEssayPatch.reconstructToFile(source, patch, destination, expected)
+                        }
+                    }
+                } else {
+                    ResourceUtils.copyFile(path, destination.absolutePath).getOrThrow()
+                }
+            },
             publishChecksums = {
                 ResourceUtils.copyFile(DATA_CHECKSUMS_NAME, destChecksumsFile.absolutePath).getOrThrow()
             },

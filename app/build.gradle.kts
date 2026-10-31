@@ -35,7 +35,6 @@ android {
         versionName = releaseIdentity.versionName
         testInstrumentationRunner = "com.osfans.trime.StartupResponsivenessInstrumentation"
 
-        multiDexEnabled = true
         buildConfigField("String", "BUILDER", "\"${project.builder}\"")
         buildConfigField("long", "BUILD_TIMESTAMP", project.buildTimestamp)
         buildConfigField("String", "BUILD_COMMIT_HASH", "\"${project.buildCommitHash}\"")
@@ -68,18 +67,15 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
-            // Keep the certificate of existing fork installations when explicitly requested.
-            // The release gate verifies the actual APK's signer and non-debuggable flag.
-            if (providers.gradleProperty("trime.forkReleaseIdentity").map { it.toBooleanStrict() }.orElse(false).get()) {
-                signingConfig = signingConfigs.getByName("debug")
-            } else {
-                signingConfig = project.signKeyFile?.let {
-                    signingConfigs.create("release") {
-                        storeFile = it
-                        storePassword = project.signKeyStorePwd
-                        keyAlias = project.signKeyAlias
-                        keyPassword = project.signKeyPwd
-                    }
+            check(!providers.gradleProperty("trime.forkReleaseIdentity").map { it.toBooleanStrict() }.orElse(false).get()) {
+                "The old Trime release signing identity is not valid for xrime"
+            }
+            signingConfig = project.signKeyFile?.let {
+                signingConfigs.create("release") {
+                    storeFile = it
+                    storePassword = project.signKeyStorePwd
+                    keyAlias = project.signKeyAlias
+                    keyPassword = project.signKeyPwd
                 }
             }
         }

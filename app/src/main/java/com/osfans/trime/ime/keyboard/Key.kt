@@ -167,7 +167,8 @@ class Key(
     init {
         if (keyDef != null) {
             val hasStateDependentBehavior =
-                keyDef.composing.orAbsent != null || keyDef.hasMenu.orAbsent != null || keyDef.paging.orAbsent != null
+                keyDef.ascii.orAbsent != null || keyDef.composing.orAbsent != null ||
+                    keyDef.hasMenu.orAbsent != null || keyDef.paging.orAbsent != null
             if (hasStateDependentBehavior) parent.appearanceStateKeys.add(this)
             sendBindings = keyDef.sendBindings || hasStateDependentBehavior
         } else {
@@ -203,7 +204,7 @@ class Key(
      */
     fun onReleased() {
         isPressed = false
-        if (click!!.isSticky) isOn = !isOn
+        if (click?.isSticky == true) isOn = !isOn
     }
 
     /**
@@ -278,7 +279,7 @@ class Key(
     val code: Int
         get() = click?.code ?: KeyEvent.KEYCODE_UNKNOWN
 
-    fun getCode(behavior: KeyBehavior): Int = getAction(behavior)!!.code
+    fun getCode(behavior: KeyBehavior): Int = getAction(behavior)?.code ?: KeyEvent.KEYCODE_UNKNOWN
 
     fun getLabel(): String {
         val action = keyAction
@@ -290,8 +291,8 @@ class Key(
     }
 
     fun getPreviewText(behavior: KeyBehavior): String = when (behavior) {
-        KeyBehavior.CLICK -> keyAction!!.getPreview(parent)
-        else -> getAction(behavior)!!.getPreview(parent)
+        KeyBehavior.CLICK -> keyAction?.getPreview(parent).orEmpty()
+        else -> getAction(behavior)?.getPreview(parent).orEmpty()
     }
 
     val symbolLabel: String
@@ -300,7 +301,7 @@ class Key(
     private val appearanceType: Int
         get() {
             return when {
-                click?.isModifierKey == true && parent.modifier.hasFlag(click!!.modifierKeyOnMask) || isOn -> 2
+                click?.let { it.isModifierKey && parent.modifier.hasFlag(it.modifierKeyOnMask) } == true || isOn -> 2
                 click?.isSticky == true || click?.isFunctional == true -> 1
                 else -> 0
             }

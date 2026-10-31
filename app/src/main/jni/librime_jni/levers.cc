@@ -93,15 +93,35 @@ static bool backupDictionaryChecked(const std::string& name) {
 #include "objconv.h"
 
 static RimeLeversApi* rime_get_levers_api() {
-  return (RimeLeversApi*)rime_get_api()->find_module("levers")->get_api();
+  auto api = rime_get_api();
+  if (!api || !api->find_module)
+    throw std::runtime_error("Rime API unavailable");
+  auto module = api->find_module("levers");
+  if (!module || !module->get_api)
+    throw std::runtime_error("Rime levers module unavailable");
+  auto levers = reinterpret_cast<RimeLeversApi*>(module->get_api());
+  if (!levers) throw std::runtime_error("Rime levers API unavailable");
+  return levers;
 }
 
 class SwitcherSettings {
  public:
   SwitcherSettings()
       : levers(rime_get_levers_api()),
-        switcher(rime_get_levers_api()->switcher_settings_init()) {
-    levers->load_settings((RimeCustomSettings*)switcher);
+        switcher(levers->switcher_settings_init()) {
+    if (!switcher)
+      throw std::runtime_error("Cannot initialize Rime switcher settings");
+    try {
+      levers->load_settings((RimeCustomSettings*)switcher);
+    } catch (...) {
+      try {
+        levers->custom_settings_destroy((RimeCustomSettings*)switcher);
+      } catch (...) {
+        // Keep the original failure while unwinding the constructor.
+      }
+      switcher = nullptr;
+      throw;
+    }
   }
   ~SwitcherSettings() {
     if (switcher)
@@ -112,8 +132,10 @@ class SwitcherSettings {
     std::vector<SchemaItem> result;
     RimeSchemaList list{};
     if (levers->get_available_schema_list(switcher, &list)) {
+      auto guard = std::unique_ptr<RimeSchemaList,
+                                   decltype(levers->schema_list_destroy)>(
+          &list, levers->schema_list_destroy);
       result = SchemaItem::fromCList(list);
-      levers->schema_list_destroy(&list);
     }
     return std::move(result);
   }
@@ -122,25 +144,28 @@ class SwitcherSettings {
     std::vector<SchemaItem> result;
     RimeSchemaList list{};
     if (levers->get_selected_schema_list(switcher, &list)) {
+      auto guard = std::unique_ptr<RimeSchemaList,
+                                   decltype(levers->schema_list_destroy)>(
+          &list, levers->schema_list_destroy);
       result = SchemaItem::fromCList(list);
-      levers->schema_list_destroy(&list);
     }
     return std::move(result);
   }
 
   bool selectSchemas(const std::vector<std::string>& schemas) {
     auto length = schemas.size();
-    const char** input = new const char*[length];
-    int i = 0;
+    if (length > static_cast<size_t>(std::numeric_limits<int>::max()))
+      throw std::length_error("Too many schemas");
+    std::vector<const char*> input;
+    input.reserve(std::max<size_t>(length, 1));
     for (const auto& id : schemas) {
-      input[i++] = id.c_str();
+      input.push_back(id.c_str());
     }
-    bool result =
-        levers->select_schemas(switcher, input, static_cast<int>(length));
+    bool result = levers->select_schemas(switcher, input.data(),
+                                         static_cast<int>(length));
     if (result) {
       levers->save_settings((RimeCustomSettings*)switcher);
     }
-    delete[] input;
     return result;
   }
 
@@ -148,12 +173,15 @@ class SwitcherSettings {
     std::vector<std::string> result;
     RimeUserDictIterator iter{};
     if (levers->user_dict_iterator_init(&iter)) {
+      auto guard =
+          std::unique_ptr<RimeUserDictIterator,
+                          decltype(levers->user_dict_iterator_destroy)>(
+              &iter, levers->user_dict_iterator_destroy);
       while (true) {
         auto name = levers->next_user_dict(&iter);
         if (!name) break;
         result.emplace_back(name);
       }
-      levers->user_dict_iterator_destroy(&iter);
     }
     return result;
   }
@@ -182,23 +210,29 @@ class SwitcherSettings {
 extern "C" JNIEXPORT jobjectArray JNICALL
 Java_com_osfans_trime_core_Rime_getAvailableRimeSchemaList(JNIEnv* env,
                                                            jclass /* thiz */) {
-  SwitcherSettings switcher;
-  return rimeSchemaListToJObjectArray(env, switcher.availableSchemas());
+  return jniCall(env, [&]() -> jobjectArray {
+    SwitcherSettings switcher;
+    return rimeSchemaListToJObjectArray(env, switcher.availableSchemas());
+  });
 }
 
 extern "C" JNIEXPORT jobjectArray JNICALL
 Java_com_osfans_trime_core_Rime_getSelectedRimeSchemaList(JNIEnv* env,
                                                           jclass /* thiz */) {
-  SwitcherSettings switcher;
-  return rimeSchemaListToJObjectArray(env, switcher.selectedSchemas());
+  return jniCall(env, [&]() -> jobjectArray {
+    SwitcherSettings switcher;
+    return rimeSchemaListToJObjectArray(env, switcher.selectedSchemas());
+  });
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_osfans_trime_core_Rime_selectRimeSchemas(JNIEnv* env,
                                                   jclass /* thiz */,
                                                   jobjectArray array) {
-  SwitcherSettings switcher;
-  return switcher.selectSchemas(stringArrayToStringVector(env, array));
+  return jniCall(env, [&]() -> jboolean {
+    SwitcherSettings switcher;
+    return switcher.selectSchemas(stringArrayToStringVector(env, array));
+  });
 }
 
 extern "C" JNIEXPORT jobjectArray JNICALL

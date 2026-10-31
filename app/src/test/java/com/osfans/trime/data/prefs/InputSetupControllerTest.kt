@@ -9,13 +9,70 @@ import kotlinx.coroutines.CancellationException
 
 class InputSetupControllerTest :
     StringSpec({
-        "full-pinyin simplified uses the actual zh_simp switch" {
+        "full-pinyin simplified changes its switch without selecting a different scheme" {
             val engine = SetupEngine()
             val chosen = InputSetupSelection(InputLayout.FULL_PINYIN, ChineseVariant.SIMPLIFIED)
             InputSetupController.apply(engine, chosen).selection shouldBe chosen
+            engine.schema shouldBe "luna_pinyin"
+            engine.writes.shouldContainExactly(listOf("simplification=true"))
+            engine.selections shouldBe emptyList()
+        }
+
+        "existing simplified schema retains customizations when switching characters" {
+            val engine = SetupEngine("luna_pinyin_simp")
+            InputSetupController.apply(engine, InputSetupSelection(InputLayout.FULL_PINYIN, ChineseVariant.SIMPLIFIED))
             engine.schema shouldBe "luna_pinyin_simp"
             engine.writes.shouldContainExactly(listOf("zh_simp=true"))
-            engine.selections.shouldContainExactly(listOf("luna_pinyin_simp"))
+            engine.selections shouldBe emptyList()
+        }
+
+        "switching between layouts preserves the selected character variant" {
+            val engine = SetupEngine("luna_pinyin_t9")
+            engine.values.getValue("luna_pinyin_t9")["simplification"] = true
+            val desired = InputSetupSelection(InputLayout.FULL_PINYIN, ChineseVariant.SIMPLIFIED)
+            InputSetupController.apply(engine, desired).selection shouldBe desired
+            engine.schema shouldBe "luna_pinyin"
+            engine.values.getValue("luna_pinyin")["simplification"] shouldBe true
+        }
+
+        "a user who enabled only the old full-pinyin schema can still select it" {
+            val engine = SetupEngine("luna_pinyin_t9")
+            engine.enabled = setOf("luna_pinyin_simp", "luna_pinyin_t9")
+            val desired = InputSetupSelection(InputLayout.FULL_PINYIN, ChineseVariant.TRADITIONAL)
+            InputSetupController.apply(engine, desired).selection shouldBe desired
+            engine.schema shouldBe "luna_pinyin_simp"
+        }
+
+        "the previous full-pinyin schema survives a nine-key round trip and engine restart" {
+            val remembered = mutableMapOf<String, String>()
+            val first = SetupEngine("luna_pinyin_simp", remembered)
+            InputSetupController.apply(first, InputSetupSelection(InputLayout.T9, ChineseVariant.SIMPLIFIED))
+            remembered["full"] shouldBe "luna_pinyin_simp"
+            val restarted = SetupEngine("luna_pinyin_t9", remembered)
+            val chosen = InputSetupSelection(InputLayout.FULL_PINYIN, ChineseVariant.SIMPLIFIED)
+            InputSetupController.apply(restarted, chosen).selection shouldBe chosen
+            restarted.schema shouldBe "luna_pinyin_simp"
+        }
+
+        "failed switch does not overwrite the remembered full-pinyin schema" {
+            val remembered = mutableMapOf("full" to "luna_pinyin")
+            val engine = SetupEngine("luna_pinyin_simp", remembered)
+            engine.failedSelection = "luna_pinyin_t9"
+            shouldThrow<InputSetupException> {
+                InputSetupController.apply(engine, InputSetupSelection(InputLayout.T9, ChineseVariant.SIMPLIFIED))
+            }
+            remembered["full"] shouldBe "luna_pinyin"
+            engine.schema shouldBe "luna_pinyin_simp"
+        }
+
+        "a removed or invalid remembered schema cannot replace an enabled full-pinyin schema" {
+            for (value in listOf("custom", "luna_pinyin_simp")) {
+                val remembered = mutableMapOf("full" to value)
+                val engine = SetupEngine("luna_pinyin_t9", remembered)
+                engine.enabled = setOf("luna_pinyin", "luna_pinyin_t9")
+                InputSetupController.apply(engine, InputSetupSelection(InputLayout.FULL_PINYIN, ChineseVariant.SIMPLIFIED))
+                engine.schema shouldBe "luna_pinyin"
+            }
         }
 
         "nine-key simplified uses simplification and an actual nine-key schema" {
@@ -141,7 +198,7 @@ class InputSetupControllerTest :
         }
     })
 
-private class SetupEngine(initialSchema: String = "luna_pinyin") : InputSetupEngine {
+private class SetupEngine(initialSchema: String = "luna_pinyin", private val remembered: MutableMap<String, String> = mutableMapOf()) : InputSetupEngine {
     var schema = initialSchema
     var empty = true
     var setterFailure: String? = null
@@ -193,5 +250,11 @@ private class SetupEngine(initialSchema: String = "luna_pinyin") : InputSetupEng
 
     override suspend fun clearPrediction() {
         predictionClears += 1
+    }
+
+    override fun preferredFullSchema() = remembered["full"].orEmpty()
+
+    override fun rememberFullSchema(id: String) {
+        remembered["full"] = id
     }
 }

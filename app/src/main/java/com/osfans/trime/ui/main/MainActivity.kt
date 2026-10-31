@@ -37,9 +37,7 @@ import com.hjq.permissions.XXPermissions
 import com.osfans.trime.BuildConfig
 import com.osfans.trime.R
 import com.osfans.trime.TrimeApplication
-import com.osfans.trime.core.data.UserDataManager
 import com.osfans.trime.daemon.RimeDaemon
-import com.osfans.trime.data.soundeffect.SoundEffectManager
 import com.osfans.trime.databinding.ActivityMainBinding
 import com.osfans.trime.ui.common.PublicWindowPilotActivity
 import com.osfans.trime.ui.common.PublicWindowViewInflater
@@ -299,14 +297,27 @@ open class MainActivity : PublicWindowPilotActivity() {
             }
 
             Intent.ACTION_RUN -> {
-                val route = intent.parcelable<NavigationRoute>(EXTRA_SETTINGS_ROUTE) ?: return
+                // This activity is exported for Android's input-method settings. Treat extras
+                // from other packages as untrusted, including malformed parcelled bundles.
+                val route = try {
+                    intent.parcelable<NavigationRoute>(EXTRA_SETTINGS_ROUTE)
+                } catch (_: RuntimeException) {
+                    null
+                } finally {
+                    // Consume invalid commands too, without unparcelling the remaining extras.
+                    intent.action = null
+                    intent.replaceExtras(null as android.os.Bundle?)
+                } ?: return
+                val path = when (route) {
+                    NavigationRoute.Main, NavigationRoute.QuickSettings, NavigationRoute.SchemaList,
+                    NavigationRoute.UserDict, NavigationRoute.Profile, NavigationRoute.General,
+                    NavigationRoute.VirtualKeyboard, NavigationRoute.CandidatesWindow, NavigationRoute.Theme,
+                    NavigationRoute.Clipboard, NavigationRoute.Advanced, NavigationRoute.Developer,
+                    NavigationRoute.About, NavigationRoute.License,
+                    -> route.path
+                }
                 navController.popBackStack(NavigationRoute.Main.path, false)
-                navController.navigate(route.path)
-                // This command describes one navigation event, not persistent
-                // Activity state. Consuming it prevents recreation from
-                // overriding NavController's restored destination.
-                intent.action = null
-                intent.removeExtra(EXTRA_SETTINGS_ROUTE)
+                navController.navigate(path)
             }
         }
     }
@@ -380,9 +391,6 @@ open class MainActivity : PublicWindowPilotActivity() {
         postToolbarMenuIfReady()
         if (toolbarMenuPosted && deferredToolbarMenu == null) {
             checkNotificationPermission()
-        }
-        lifecycleScope.launch(Dispatchers.IO) {
-            if (UserDataManager.isStorageAvailable()) SoundEffectManager.init()
         }
     }
 

@@ -59,6 +59,13 @@ class KeyView(
 
     private fun <T> dispatchInput(action: () -> T): T = service.withInputFeedback(feedbackNanos, action)
 
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        // A visual blank must not vibrate, play sounds or start a gesture.
+        // Explicit long-press/swipe/popup actions remain available.
+        if (key.keyActions.isEmpty() && key.popup.isEmpty()) return false
+        return super.onTouchEvent(event)
+    }
+
     private var keyPressed = false
     override fun isPressed(): Boolean = keyPressed
 
@@ -95,14 +102,14 @@ class KeyView(
         hasDouble = key.hasAction(KeyBehavior.DOUBLE_CLICK) || (key.isShift && !key.hasAction(KeyBehavior.LAZY_DOUBLE_CLICK))
         hasLazyDouble = key.hasAction(KeyBehavior.LAZY_DOUBLE_CLICK)
         hasPopup = key.popup.isNotEmpty()
-        isClickable = key.click != null
-        importantForAccessibility = if (isClickable) IMPORTANT_FOR_ACCESSIBILITY_YES else IMPORTANT_FOR_ACCESSIBILITY_NO
+        isClickable = key.click != null || listOf(KeyBehavior.ASCII, KeyBehavior.COMPOSING, KeyBehavior.HAS_MENU, KeyBehavior.PAGING).any(key::hasAction)
+        importantForAccessibility = if (hasAccessibleBehavior()) IMPORTANT_FOR_ACCESSIBILITY_YES else IMPORTANT_FOR_ACCESSIBILITY_NO
         updateAccessibilityDescription()
 
         onPress = {
             if (keyboard.firstPressedKeyIndex == -1) keyboard.firstPressedKeyIndex = id
             setPressedState(true)
-            key.getCode(KeyBehavior.CLICK).let { keyboardActionListener.onPress(it) }
+            key.getAction(KeyBehavior.CLICK)?.let { keyboardActionListener.onPress(it.code) }
             feedbackNanos = if (InputLatencyLog.enabled) InputLatencyLog.now() else 0L
             showPopupPreview()
         }
@@ -166,6 +173,8 @@ class KeyView(
                     dispatchInput { keyboardActionListener.onAction(theme.resolveAction(if (delta > 0) "Right" else "Left")) }
                 }
             } else if (isSlideDelete) {
+                // Sliding owns a text undo buffer; never retain a search query in it.
+                if (!service.allowInputAction() || service.isClipboardSearchEditing) return@slide
                 if (RimeDaemon.readCached { statusCached.isComposing } == true) {
                     when {
                         delta < 0 -> dispatchInput { keyboardActionListener.onKey(KeyEvent.KEYCODE_DEL, 0) }
@@ -178,7 +187,7 @@ class KeyView(
                     }
                     return@slide
                 }
-                val ic = service.currentInputConnection
+                val ic = service.currentInputConnection ?: return@slide
                 when {
                     delta < 0 -> {
                         val beforeText = ic.getTextBeforeCursor(1, 0) ?: ""
@@ -323,6 +332,9 @@ class KeyView(
 
     private fun canAccessibilityLongPress(): Boolean = hasLongPress && !hasPopup && !isRepeatable
 
+    private fun hasAccessibleBehavior(): Boolean = isClickable || canAccessibilityLongPress() ||
+        accessibilitySwipeActions.any { key.hasAction(it.first) }
+
     private fun accessibilityActivationAllowed(): Boolean = isShown && isAttachedToWindow &&
         RimeDaemon.readCached { isReady } == true && keyboard.firstPressedKeyIndex == -1 &&
         keyboard.keys.none { it.isPressed } &&
@@ -330,7 +342,7 @@ class KeyView(
 
     /** Cached key views describe current visible captions without reading editor content. */
     private fun updateAccessibilityDescription() {
-        if (!isClickable) {
+        if (!hasAccessibleBehavior()) {
             contentDescription = null
             ViewCompat.setStateDescription(this, null)
             return
@@ -394,7 +406,7 @@ class KeyView(
         info.contentDescription = contentDescription
         info.isCheckable = action?.isModifierKey == true || !action?.toggle.isNullOrEmpty() || action?.isSticky == true
         info.setCheckedState(info.isCheckable && accessibilityChecked(action))
-        info.isClickable = isEnabled && isClickable
+        info.isClickable = isEnabled && isClickable && action != null
         info.isLongClickable = isEnabled && canAccessibilityLongPress()
         if (!info.isClickable) info.removeAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_CLICK)
         info.removeAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_LONG_CLICK)
@@ -424,7 +436,7 @@ class KeyView(
     }
 
     override fun performAccessibilityAction(action: Int, arguments: Bundle?): Boolean = when (action) {
-        AccessibilityNodeInfo.ACTION_CLICK -> accessibilityActivationAllowed() && isClickable && performAccessibilityBehavior(KeyBehavior.CLICK)
+        AccessibilityNodeInfo.ACTION_CLICK -> accessibilityActivationAllowed() && isClickable && accessibilityAction() != null && performAccessibilityBehavior(KeyBehavior.CLICK)
 
         AccessibilityNodeInfo.ACTION_LONG_CLICK -> accessibilityActivationAllowed() && canAccessibilityLongPress() && performAccessibilityBehavior(KeyBehavior.LONG_CLICK)
 
@@ -470,7 +482,8 @@ class KeyView(
 
         drawBackground(canvas, key)
 
-        visualContentLayout().forEach { content ->
+        val fonts = keyboardView.fonts()
+        visualContentLayout(fonts).forEach { content ->
             val color = if (content.isMain) key.getTextColor() else key.getSymbolColor()
             if (content.icon) {
                 drawIcon(canvas, content.original, content.bounds, color)
@@ -478,7 +491,7 @@ class KeyView(
                 val paint = if (content.isMain) textPaint else symbolPaint
                 paint.color = color
                 paint.textSize = content.text.size
-                paint.typeface = if (content.isMain) theme.fonts.key else theme.fonts.symbol
+                paint.typeface = if (content.isMain) fonts.key else fonts.symbol
                 paint.textAlign = Paint.Align.CENTER
                 paint.clearShadowLayer()
                 val centerX = (content.bounds.left + content.bounds.right) / 2f
@@ -516,7 +529,7 @@ class KeyView(
     )
 
     /** The same finite plan drives Canvas drawing and the attached-view layout regression. */
-    internal fun visualContentLayout(): List<VisualContent> {
+    internal fun visualContentLayout(fonts: KeyboardView.Fonts = keyboardView.fonts()): List<VisualContent> {
         val label = key.getLabel().let { if (it == "enter_labels") keyboardView.labelEnter else it }
         val symbol = key.symbolLabel.takeUnless {
             keyboardView.hideKeySymbol || (keyboard.isT9Layout && it == key.hint)
@@ -545,7 +558,7 @@ class KeyView(
                 KeyContentLayout.Text(emptyList(), size, size, 0f, size)
             } else {
                 val paint = if (main) textPaint else symbolPaint
-                paint.typeface = if (main) theme.fonts.key else theme.fonts.symbol
+                paint.typeface = if (main) fonts.key else fonts.symbol
                 paint.textAlign = Paint.Align.LEFT
                 val ink = Rect()
                 KeyContentLayout.text(text, preferred, dp(if (main) 12 else 8).toFloat(), area, 2) { line, size ->

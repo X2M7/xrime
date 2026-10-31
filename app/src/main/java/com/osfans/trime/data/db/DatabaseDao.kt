@@ -12,6 +12,8 @@ import androidx.room.Insert
 import androidx.room.Query
 import androidx.room.Update
 
+internal const val MAX_CLIPBOARD_SEARCH_UNITS = 512
+
 @Dao
 interface DatabaseDao {
     @Insert
@@ -61,6 +63,10 @@ interface DatabaseDao {
 
     @Query("SELECT * FROM ${DatabaseBean.TABLE_NAME} ORDER BY pinned DESC, time DESC")
     fun allBeans(): PagingSource<Int, DatabaseBean>
+
+    /** Literal substring search: percent and underscore are ordinary characters. */
+    @Query("SELECT * FROM ${DatabaseBean.TABLE_NAME} WHERE instr(text, :query) > 0 ORDER BY pinned DESC, time DESC")
+    fun searchBeans(query: String): PagingSource<Int, DatabaseBean>
 
     @Query("SELECT * FROM ${DatabaseBean.TABLE_NAME} WHERE id=:id LIMIT 1")
     suspend fun get(id: Int): DatabaseBean?

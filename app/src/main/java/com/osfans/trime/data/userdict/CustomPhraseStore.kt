@@ -26,9 +26,15 @@ object CustomPhraseStore {
         val source = File(root(), FILE_NAME)
         if (source.canonicalFile != source.absoluteFile) throw IOException("Unsafe phrase dictionary path")
         if (!source.exists()) return ""
-        if (source.length() > DictionaryTextFormats.MAX_PHRASE_BYTES) throw IOException("Phrase dictionary is too large for the editor; use export")
-        DictionaryTextFormats.validateTable(source)
-        return source.readText()
+        val bytes = try {
+            source.inputStream().use { input ->
+                DictionaryTextFormats.readBounded(input, DictionaryTextFormats.MAX_PHRASE_BYTES)
+            }
+        } catch (failure: DictionarySizeLimitException) {
+            throw IOException("Phrase dictionary is too large for the editor; use export", failure)
+        }
+        DictionaryTextFormats.validateTable(bytes)
+        return bytes.toString(Charsets.UTF_8)
     }
 
     /** Replace all entries after validation; an exact backup and crash journal precede the write. */
