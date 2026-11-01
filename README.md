@@ -1,223 +1,30 @@
 <!--
 SPDX-FileCopyrightText: 2015 - 2024 Rime community
-
 SPDX-License-Identifier: GPL-3.0-or-later
 -->
 
 # xrime
 
-xrime is an independent Android input method based on [Trime](https://github.com/osfans/trime) and [X2M7/trime](https://github.com/X2M7/trime). Its application ID is `com.x2m7.xrime`, so it can be installed alongside Trime. Existing private data is not migrated automatically.
+xrime is an independent Android input method based on [Trime](https://github.com/osfans/trime), [X2M7/trime](https://github.com/X2M7/trime), and the [Rime](https://rime.im/) input method engine. Its application ID is `com.x2m7.xrime`: it can be installed alongside Trime, but private data is not migrated automatically.
 
-The first release is an **alpha prerelease**. It is not a production-ready replacement: some upstream issues remain open, full lint still reports build-plugin upgrade notices, and a known sound-pack directory scan can crash under particular filename and Android runtime conditions. See the [verification record](docs/xrime-verification.md) and [upstream issue checklist](docs/xrime-upstream-issues.md).
+[简体中文](README_sc.md) · [繁體中文](README_tc.md) · [Website](https://x2m7.github.io/xrime/) · [Downloads](https://github.com/X2M7/xrime/releases)
 
-Release APKs target Android 5.0 or later and are provided separately for ARM64 and x86_64. Back up dictionaries and configuration before testing. The project is licensed under [GPL-3.0-or-later](LICENSE).
+## Download and status
 
-[简体中文](README_sc.md) · [Website](https://x2m7.github.io/xrime/) · [Releases](https://github.com/X2M7/xrime/releases)
+The current release is **[v0.1.0-alpha.1](https://github.com/X2M7/xrime/releases/tag/v0.1.0-alpha.1)**, an alpha prerelease for Android 5.0 and later. Choose the ARM64 APK for a compatible phone or the x86_64 APK for a compatible device or emulator. Back up dictionaries and configuration separately before testing.
 
-<details>
-<summary>Historical X2M7/trime README (not xrime release claims)</summary>
+Some upstream issues remain open, full lint reports build-plugin upgrade notices, and sound-pack directory scanning can crash with particular filenames and Android runtime conditions. The ARM64 package has not been tested on a physical device. See the [verification record](docs/xrime-verification.md) and [upstream issue checklist](docs/xrime-upstream-issues.md) for the tested scope and outstanding issues.
 
-# Trime
+## Source and builds
 
-Rime IME for Android
-
-![build](https://github.com/X2M7/trime/actions/workflows/commit-ci.yml/badge.svg?branch=develop)
-[![License: GPL v3](https://img.shields.io/badge/License-GPL%20v3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![GitHub release](https://img.shields.io/github/release/X2M7/trime.svg)](https://github.com/X2M7/trime/releases)
-[![F-Droid release](https://img.shields.io/f-droid/v/com.osfans.trime.svg)](https://f-droid.org/packages/com.osfans.trime)
-[![Project page](https://img.shields.io/badge/GitHub%20Pages-Trime%20T9-2f6f5e)](https://x2m7.github.io/trime/)
-
-English | [简体中文](README_sc.md) | [繁體中文](README_tc.md)
-
-## v3.3.13-t9.18 — Upstream integration
-
-This candidate merges the six upstream develop commits through `c7f32b6c`. It forwards modified Return as a key chord and consolidates data management under `core.data.UserDataManager`, while preserving this fork's validated transactional imports, rollback, cancellation, existing sync history and Direct Boot behavior. A missing default configuration is bootstrapped without overwriting user files. Hash buffers are 32 KiB; local content is checked again after suspending SAF reads. Gradle 9.8.1 was already present before this merge.
-
-VersionCode `20261123` exceeds `20261122`, the maximum across 28 audited public APKs. Official builds retain package `com.osfans.trime.debug` and the original certificate; this candidate passed inspection of actual Release identity, debuggable=false, minSdk21, the original signer and each APK's single native ABI, with zero signing warnings. Back up dictionaries and configuration to a separate location before installing over the existing app.
-
-Debug and Release builds exited successfully with zero build warnings. This candidate freshly passed 820 app JVM tests (86 XML reports), Spotless and 268 host checks; 34 build-logic results were cached (28 convention + 6 compatibility). Both Lint variants passed with zero issues, and both Release APKs passed actual identity, signature and ABI inspection with zero signing warnings. Android 5.0 and Android 15 each passed nine ordinary Release upgrade checks, the original Debug editor regression plus five Return cases, real system-folder authorization and seven strict import checks. Each also passed 40 display rounds across two themes and 100 show/hide cycles, without uninstalling or clearing Trime data. Both controllers and emulators stopped normally.
-
-Android 5.0/15 logs retain all 3,024/8,126 W/E lines; unresolved diagnostics are not classified as harmless platform noise. These are bounded emulator checks, not an all-runtime-warnings-fixed or physical-device claim.
-
-See the [validation report](script/quality/VALIDATION-UPSTREAM18.md), [upgrade guide](script/release/README.md) and [version Release](https://github.com/X2M7/trime/releases/tag/v3.3.13-t9.18). Manual assets are limited to two Release APKs and complete recursive source; use the version Release page to confirm public availability. Earlier unresolved ART finalizer diagnostics include old and new Trime services; this is not an all-runtime-warnings-fixed claim. Physical ARM64/OEM/16 KiB devices, real-device TalkBack/TTS, P95/PSS and long-term residency remain unverified.
-
-The v3.3.13-t9.17 section below is historical evidence for that version.
-
-## Historical v3.3.13-t9.17 — Version and upgrade consistency
-
-One metadata file now supplies the app version, APK names, release tools and Pages. VersionCode `20261122` exceeds the maximum `20261121` found in all 26 audited public APKs. The historical package `com.osfans.trime.debug` and signing certificate remain; official APKs are non-debuggable Release builds. Back up configuration and dictionaries to a separate location, then install over the existing app without uninstalling or clearing its data.
-
-This build passed 812 newly executed app JVM tests and 268 host checks; 34 build-logic tests used cached results. Both Lint variants reported zero issues.
-
-Android 5.0 and Android 15 x86_64 emulators each passed all nine checks when upgrading the normal v3.3.13-t9.16 Release APK to this Release. The checks cover retained configuration, preferences, UID, selected/enabled IME and the real native user dictionary. They use a dedicated fixture and an internal empty editor; public UI input and cross-package migration remain outside this scope.
-
-See the [T14 validation report](script/quality/VALIDATION-T14.md), [upgrade guide](script/release/README.md) and [version Release](https://github.com/X2M7/trime/releases/tag/v3.3.13-t9.17) for scope and online status. The planned attachments are two Release APKs and complete recursive source. Physical ARM64 devices, OEM behavior, 16 KiB pages, audible TTS, P95/PSS and long-term residency remain unverified; runtime warnings, earlier failed attempts and the separate helper’s unresolved warning remain documented.
-
-The v3.3.13-t9.16 section below is historical evidence for that version.
-
-## Historical v3.3.13-t9.16 — Accessibility and device adaptation
-
-Keys, candidates, T9 pinyin filters and preedit controls now expose accessible names, roles, selection state and actions. The Enter key’s accessible name reflects its current action, such as Send or Search. Candidate actions reject stale input identities after a refresh. Large text, landscape layouts and window insets receive improved handling; short screens provide vertical scrolling to reach content.
-
-The v3.3.13-t9.16 build passed 812 fresh application JVM tests and 227 fresh host checks. Separate Debug/Release Lint runs reported no issues; build and both normal Release APK signature checks reported no warnings. The historical 384 native checks are reused after verifying 31 unchanged inputs; they were not rerun. Production JNI tasks were up-to-date, not all freshly compiled.
-
-The tested emulator scope includes four Android 5.0 configurations, eight Android 15 configurations and one additional Steam dark-palette check. The night-mode matrix retained a light palette; the separate Steam screenshots provide the dark-palette evidence. On the normal Android 15 Release APK, actual TalkBack FOSS exploration and double-tap activation completed T9 input, pinyin filtering, candidate selection and Send. TalkBack input also passed at font scales 1 and 2 in both split-screen positions; the complete runtime warning review is recorded in the validation report.
-
-This historical record was frozen before its publication; see the [version release page](https://github.com/X2M7/trime/releases/tag/v3.3.13-t9.16) for online status. Runtime system/emulator warnings and earlier failed attempts remain preserved; this is not a claim that all warnings or risks have been eliminated. [9.16 validation scope](script/quality/VALIDATION-t9.16.md) · [Historical 9.15 validation](script/quality/VALIDATION-t9.15.md).
-
-Android 5.0+ and ARM64/x86_64 build support remain. Physical phones, OEM behavior, 16 KiB pages, real speech/TTS, candidate P95/PSS and long-term residency remain unverified. The manual assets planned for v3.3.13-t9.16 were two normal Release APKs and one complete source archive containing the main repository and all 21 recursive submodules; GitHub's automatic source zip/tar archives remain available.
-
-## About
-
-Trime is originally a frontend of open-source [Android Traditional Chinese IME], based on [RIME] input method framework and written in Java/Kotlin with JNI. It is designed to protect the native language of various local dialects of Chinese and is a universal shape-based and phonetic-based input method platform.
-
-[Documentation](https://github.com/osfans/trime/wiki)
-
-## T9 Pinyin
-
-This fork adds dictionary-backed `Luna Pinyin T9` / `luna_pinyin_t9` to Trime, with a 3x3 main key area in both bundled themes. Digits 2–9 enter pinyin; syllable locking, middle editing, unlocking and undo preserve the original numeric input. Selecting pinyin does not commit Hanzi. The layout supports a pinyin sidebar or horizontal list, one-handed modes, adjustable key height, literal digits on long press and Space cursor sliding.
-
-[Project page](https://x2m7.github.io/trime/) | [Download T9 stable APKs](https://github.com/X2M7/trime/releases/latest)
-
-## Download
-
-- T9 Stable [Download](https://github.com/X2M7/trime/releases/latest)
-
-- Upstream Stable Channel <br>
-  [<img alt='Get it on F-Droid' src='https://fdroid.gitlab.io/artwork/badge/get-it-on.png' height='80px'/>](https://f-droid.org/packages/com.osfans.trime)
-  [<img alt='Google Play Download Now' src='https://play.google.com/intl/en_us/badges/images/generic/en_badge_web_generic.png' height='80px'/>](https://play.google.com/store/apps/details?id=com.osfans.trime)
-
-- Nightly Channel [Download](https://github.com/osfans/trime/releases/tag/nightly)
-
-- Canary Channel [Download](https://github.com/osfans/trime/actions)
-
-- Configurations [rimerc](https://github.com/Bambooin/rimerc)
-
-## History
-
-TRIME is the abbreviation of _Tongwen RIME_ or _ThaeRv Input Method_.
-
-From the beginning, TRIME was written for TaeRv Pinyin, and named _TaeRv Input Method (泰如输入法)_.
-
-Then, we created an input method platform with some code tables, such as Wu dialect (吴语). We renamed it to _Chinese Character Dialect Input Method (汉字方言输入法)_.
-
-Later, it supports Wubi and Liangbi and other shape-based input method, we branded it [_Tongwen Input Method Platform 2.0 (同文输入法平台 2.0)_](https://github.com/osfans/trime-legacy), which implies that the phonetic-based and shape-based input method on one platform, while dialects and Mandrain share one kind of characters.
-
-Benefit from the [librime](https://github.com/rime/librime) project by JNI, we are now in version 3.0 of TRIME aka _Tongwen Input Method (同文输入法)_.
-
-Your are now welcome to [contribution](CONTRIBUTING.md) ~ !
-
-## Getting Started for developer
-
-### Prepare
-
-#### Requirements:
-
-- Android SDK and Android NDK
-  * If you are new to Android development, please install [Android Studio](https://developer.android.com/studio).
-
-- JDK (OpenJDK) 17
-- Python 3 (required by OpenCC to generate dictionary text files)
-
-#### Prerequisites for Windows
-
-Symbolic links will be created according to current build configurations, developers need:
-
-- Enable [Developer Mode](https://learn.microsoft.com/en-us/windows/apps/get-started/enable-your-device-for-development) so that symlinks can be created without administrator privilege.
-
-- Enable symlink support for `git`:
-
-  ```powershell
-  git config --global core.symlinks true
-  ```
-
-If you cannot or wouldn't like to enable anything, it doesn't matter. Copying will be used instead when error on creating symbolic links.
-
-### Build
-
-#### 1. Clone this project and fetch all submodules:
+Clone recursively so native dependencies are included:
 
 ```sh
-git clone git@github.com:X2M7/trime.git
-cd trime
-git submodule update --init --recursive
+git -c core.autocrlf=false -c core.eol=lf clone --recurse-submodules https://github.com/X2M7/xrime.git xrime
 ```
 
-#### 2. Debug version without signature:
+See [source checkout and builds](docs/source-checkout.md) for pinned source bytes and this workspace's Windows build setup. The [identity notes](docs/xrime-identity.md) explain the application ID, signing, and historical tooling limitations. The [privacy notice](PRIVACY.md) describes data handling.
 
-```sh
-# On Linux or macOS
-make debug
+## Contributing and license
 
-# On Windows
-.\gradlew assembleDebug
-```
-
-#### 3. Release version with signture:
-
-Create `keystore.properties` file which contains following contents for [signing information](https://developer.android.com/studio/publish/app-signing.html):
-
-```gradle.properties
-storePassword=myStorePassword
-keyPassword=mykeyPassword
-keyAlias=myKeyAlias
-storeFile=myStoreFileLocation
-```
-
-Then, you may run:
-
-```sh
-# On Linux or macOS
-make release
-
-# On Windows
-.\gradlew assembleRelease
-```
-
-### Troubleshooting
-
-```
-Target "boost_log_setup" links to target "Boost::coroutine" but the target was not found.
-```
-
-Run `make clean` on Linux or macOS, or run `.\gradlew clean` on Windows.
-
-Other issues:
-
-1. Try `make clean`
-2. Make sure your repo is up-to-date. If one or more submodules are modified, also make sure they are compatible with the current version.
-3. If the problem still exists(very unlikely), try to make a new clone.
-4. Check if this is there is an issue/PR related to your problem. If yes, try their solutions.
-5. If none of them works, you may make an issue to ask for help.(optional)
-
-## Acknowledgments
-
-- Developer: [osfans](https://github.com/osfans)
-- Contributors: [boboIqiqi](https://github.com/boboIqiqi)、[Bambooin](https://github.com/Bambooin)、[senchi96](https://github.com/senchi96)、[heiher](https://github.com/heiher)、[abay](https://github.com/a342191555)、[iovxw](https://github.com/iovxw)、[huyz-git](https://github.com/huyz-git)、[tumuyan](https://github.com/tumuyan)、[WhiredPlanck](https://github.com/WhiredPlanck)、[nopdan](https://github.com/nopdan)...
-- [Wiki Editors](https://github.com/osfans/trime/wiki): [xiaoqun2016](https://github.com/xiaoqun2016)、[boboIqiqi](https://github.com/boboIqiqi)...
-- Translators: 天真可爱的满满 (Chinese Traditional), 点解 (English) ...
-- Keyboard Designers: 天真可爱的满满、皛筱晓小笨鱼、吴琛 11、熊猫阿 Bo、默默ㄇㄛ ˋ...
-- Donations: See QR Code in [Releases](https://github.com/osfans/trime/releases)
-- Community: Netizens who feedback in [Issues](https://github.com/osfans/trime/issues)、[QQ Group (811142286)](https://jq.qq.com/?_wv=1027&k=AXdR80HN)、[QQ Group (224230445)](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=pg_q7UVumWYLq1Rk8kIAqkK1xGt64VnX&authKey=04m9l7OBO5H5vgrEL8IbpsmtnptWM60xy%2FUwYCfyvw9VcRhe8zRzAS1ezoemZdFr&noverify=0&group_code=224230445)、[Tieba](http://tieba.baidu.com/f?kw=rime)、[Google Play](https://play.google.com/store/apps/details?id=com.osfans.trime)、[Telegram](https://t.me/trime_dev)...
-- Projects: [RIME]、[OpenCC]、[Android Traditional Chinese IME] and so on.
-
-## Third Party Libraries
-
-- [Boost C++ Libraries](https://www.boost.org/) (Boost Software License)
-- [darts-clone](https://github.com/s-yata/darts-clone) (New BSD License)
-- [LevelDB](https://github.com/google/leveldb) (New BSD License)
-- [libiconv](https://www.gnu.org/software/libiconv/) (LGPL License)
-- [marisa-trie](https://github.com/s-yata/marisa-trie) (BSD License)
-- [glog](https://github.com/google/glog) (New BSD License)
-- [OpenCC](https://github.com/BYVoid/OpenCC) (Apache License 2.0)
-- [RIME](https://rime.im) (BSD License)
-- [snappy](https://github.com/google/snappy)(BSD License)
-- [utfcpp](https://github.com/nemtrif/utfcpp) (Boost Software License)
-- [yaml-cpp](https://github.com/jbeder/yaml-cpp) (MIT License)
-- [Android Traditional Chinese IME](https://code.google.com/p/android-traditional-chinese-ime/) (Apache License 2.0)
-
-[Android Traditional Chinese IME]: https://code.google.com/p/android-traditional-chinese-ime/
-[RIME]: http://rime.im
-[OpenCC]: https://github.com/BYVoid/OpenCC
-
-</details>
+Please use the [xrime issue tracker](https://github.com/X2M7/xrime/issues) and see [CONTRIBUTING.md](CONTRIBUTING.md). The project is licensed under [GPL-3.0-or-later](LICENSE). We thank the Rime and Trime communities and the contributors listed in [AUTHORS](AUTHORS); third-party notices are retained with the source.

@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-/** The same strict, unescaped format consumed by script/release/release.py. */
+/** Parses the strict, unescaped release.properties format. */
 data class ReleaseMetadata(
     val versionName: String,
     val versionCode: Int,
